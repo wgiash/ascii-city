@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ネオン坂 — NEON-ZAKA</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh;cursor:grab}
+  #hud{position:fixed;left:18px;top:14px;color:#8f9ab0;font:12px/1.5 "Menlo","Osaka-Mono",monospace;
+       pointer-events:none;text-shadow:0 0 8px rgba(120,180,255,.4)}
+  #hud b{font-size:15px;letter-spacing:3px;color:#ffd870}
+  #hint{position:fixed;left:18px;bottom:14px;color:#4a5468;font:11px/1.6 "Menlo",monospace;
+        pointer-events:none;transition:opacity 2s}
+  #pop{position:fixed;right:18px;top:14px;color:#8fe8b8;font:12px/1.5 "Menlo",monospace;
+       letter-spacing:1px;pointer-events:none;text-shadow:0 0 8px rgba(90,230,160,.4)}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hint">drag to look &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; SPACE/CTRL up-down &nbsp;·&nbsp; HOLD RIGHT-CLICK to web-swing &nbsp;·&nbsp; M map</div>
+<div id="pop"></div>
+<script>
+'use strict';
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+
+/* ---------- rng / hash ---------- */
+function mulberry(s){return function(){s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rnd=mulberry(7161);
+function h32(x){x|=0;x=Math.imul(x^x>>>16,0x45d9f3b);x=Math.imul(x^x>>>16,0x45d9f3b);
+  return((x^x>>>16)>>>0)/4294967296}
+const hash2=(a,b)=>h32(a*374761393+b*668265263+974711);
+const hash3=(a,b,c)=>h32(a*374761393+b*668265263+c*2246822519+974711);
+function vn(x,y){                      // smooth value noise, for the clouds
+  const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi;
+  const a=hash2(xi,yi),b=hash2(xi+1,yi),c=hash2(xi,yi+1),d=hash2(xi+1,yi+1);
+  const u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf);
+  return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v}
+
+/* ---------- palette: flat kinds x 4 fog levels ---------- */
+/* 0 FACE 1 ROOF 2 EDGE 3 DIM 4 WHITE 5 WHITE2 6 BEACON 7 CAR, then hue pairs (bright,dim) */
+const KRGB=[
+ [12,18,14],[34,46,38],[150,190,165],[95,130,110],
+ [240,252,242],[255,255,252],[255,60,50],[255,220,150],
+ [120,255,190],[60,130,100],  // mako green
+ [255,236,180],[150,135,95],  // warm cream
+ [255,200,110],[150,115,60],  // gold
+ [200,245,220],[115,145,128], // pale green-white
+ [90,220,180],[50,120,100],   // teal
+ [235,250,240],[140,152,146], // cool white
+ [255,170,80],[150,98,45],    // amber
+ [255,120,60],[150,70,35],    // orange
+ [24,44,36],[10,22,17],       // water
+ [70,130,85],[28,56,36],      // park green
+ [120,130,122],[70,78,72],    // sidewalk gray-green
+ [14,20,28],[24,34,44],       // (unused glyph body tones)
+ [38,50,60],[54,68,78],
+ [22,29,36],[46,58,66]];      // cloud body, moonlit cloud edge (faint)
+const FOGM=[1,0.8,0.58,0.34];         // mix weight toward the dusk haze (bright kinds)
+const HAZE=[46,82,62];
+const FPAL=KRGB.map(c=>{
+  const lum=(c[0]+c[1]+c[2])/3;       // darks fade to BLACK, keeping contrast deep
+  return FOGM.map((g,fi)=>{
+    if(lum<70){const k=[1,0.75,0.5,0.3][fi];
+      return`rgb(${c[0]*k|0},${c[1]*k|0},${c[2]*k|0})`}
+    return`rgb(${c[0]*g+HAZE[0]*(1-g)|0},${c[1]*g+HAZE[1]*(1-g)|0},${c[2]*g+HAZE[2]*(1-g)|0})`})});
+const WPICK=[1,1,2,1,0,5,1,2,4,1,3,2,0,6,5,7]; // warm sprawl, mako-green accents
+/* facade background shades: 4 body tones x 2 sides x 3 skylight bands x 4 fog,
+   plus 4 roof shades at the end — solid fills painted behind the glyphs */
+const GLOW=[90,150,120];
+/* 8 body hues: green-tinted industrial darks */
+const BODYT=[[5,8,7],[7,11,9],[10,15,11],[11,10,7],[8,12,10],[12,13,9],[15,20,16],[8,8,7]];
+const FBGC=[];
+{const mixc=(a,b,t)=>[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t];
+ const FK=[1,0.82,0.64,0.48];
+ for(let t=0;t<8;t++)for(let s=0;s<2;s++)for(let b=0;b<3;b++)for(let f=0;f<4;f++){
+   let c=mixc(BODYT[t],GLOW,b===0?0.16:b===1?0.06:0.02);
+   const m=(s?0.75:1)*FK[f];
+   FBGC.push(`rgb(${c[0]*m|0},${c[1]*m|0},${c[2]*m|0})`)}
+ for(let f=0;f<4;f++){const m=FK[f];                     // 192..195: roofs
+   FBGC.push(`rgb(${19*m|0},${27*m|0},${21*m|0})`)}
+ for(let f=0;f<4;f++){const m=FK[f];                     // 196..199: tree foliage
+   FBGC.push(`rgb(${24*m|0},${44*m|0},${30*m|0})`)}
+ for(let f=0;f<4;f++){const m=FK[f];                     // 200..203: river water (recessed, dark)
+   FBGC.push(`rgb(${8*m|0},${18*m|0},${14*m|0})`)}
+ for(let f=0;f<4;f++){const m=FK[f];                     // 204..207: bridge deck
+   FBGC.push(`rgb(${21*m|0},${27*m|0},${22*m|0})`)}}
+const FBGB=Array.from({length:FBGC.length},()=>[]);
+const hueKind=bid=>8+2*WPICK[(hash2(bid,77)*16)|0];
+
+/* ---------- city: roads (1 street/one-way, 2 avenue, 3 highway), river, parks ---------- */
+const G=120, HGT=new Uint8Array(G*G), BID=new Int32Array(G*G), TER=new Uint8Array(G*G),
+      RI=new Uint8Array(G),RJ=new Uint8Array(G),RIO=new Uint8Array(G),RJO=new Uint8Array(G),
+      RIW=new Uint8Array(G),RJW=new Uint8Array(G);
+const TREES=[],BRI=new Uint8Array(G),BRJ=new Uint8Array(G),PIER=new Uint8Array(G*G),
+      BRIDGES=[],FURN=[],PEDS=[];
+let POPBASE=0;
+(function gen(){
+  function lay(T,O,Wd){let p=14;                          // streets & avenues only
+    while(p<G-7){const rr=rnd();const t=rr<0.42?2:1;
+      for(let k=0;k<t;k++){T[p+k]=t;O[p+k]=k;Wd[p+k]=t}
+      p+=t+3+(rnd()*6|0)}}
+  lay(RI,RIO,RIW);lay(RJ,RJO,RJW);
+  function belt(T,O,Wd,p){for(let k=0;k<3;k++){T[p+k]=3;O[p+k]=k;Wd[p+k]=3}}
+  belt(RI,RIO,RIW,9);belt(RJ,RJO,RJW,G-13);               // elevated beltway at the edges
+  for(let j=0;j<G;j++){                                   // winding river
+    const c=G*0.42+Math.sin(j*0.09)*9+j*0.12;
+    for(let i=0;i<G;i++)if(Math.abs(i-c)<2.6)TER[j*G+i]=1}
+  for(let j=1;j<G-1;j++)for(let i=1;i<G-1;i++){           // riverside promenades
+    if(TER[j*G+i]||RI[i]||RJ[j])continue;
+    if(TER[j*G+i-1]===1||TER[j*G+i+1]===1||TER[(j-1)*G+i]===1||TER[(j+1)*G+i]===1)
+      TER[j*G+i]=3}
+  for(let i=0;i<G;i++){   // only roads perpendicular to the river may bridge it
+    if(RI[i])BRI[i]=RI[i]===3?1:0;          // north-south roads run parallel: never
+    if(RJ[i])BRJ[i]=RJ[i]===3?1:(hash2(i-RJO[i],211)<0.3?1:0)}
+  function scanBridges(T,B,O,W2,ax){                      // spans where a bridge crosses water
+    for(let i=0;i<G;i++){
+      if(!T[i]||T[i]===3||O[i]!==0||!B[i])continue;
+      const c=i+W2[i]/2;let run=null;
+      for(let k=0;k<G;k++){
+        const w=ax===0?TER[k*G+i]===1:TER[i*G+k]===1;
+        if(w){if(!run)run={s:k};run.e=k}
+        else if(run){if(run.e>=run.s)BRIDGES.push({ax,c,s:run.s-0.2,e:run.e+1.2,w:W2[i]});run=null}}
+    }}
+  scanBridges(RI,BRI,RIO,RIW,0);scanBridges(RJ,BRJ,RJO,RJW,1);
+  for(let j=2;j<G-2;j++)for(let i=2;i<G-2;i++){           // street furniture
+    const t=Math.max(RI[i],RJ[j]);if(!t||t>2||TER[j*G+i])continue;
+    const h7=hash2(i*3,j*7);
+    if(h7<0.3)FURN.push({x:i+0.15,z:j+0.2+hash2(j,i)*0.6,k:0});        // lamppost
+    if(h7>0.9)FURN.push({x:i+0.8,z:j+0.7,k:1,hu:8+2*WPICK[(hash2(i*5,j*9)*16)|0]}); // sign
+    else if(h7>0.84)FURN.push({x:i+0.82,z:j+0.3,k:2});                 // garbage can
+    else if(h7>0.78)FURN.push({x:i+0.18,z:j+0.6,k:3});                 // bench
+  }
+  for(let j=1;j<G-1;j++)for(let i=1;i<G-1;i++){           // piers off the promenades
+    if(TER[j*G+i]!==1)continue;
+    if(TER[j*G+i-1]===3&&rnd()<0.12)PIER[j*G+i]=1;
+    else if(TER[j*G+i+1]===3&&rnd()<0.12)PIER[j*G+i]=2;
+    else if(TER[(j-1)*G+i]===3&&rnd()<0.12)PIER[j*G+i]=3;
+    else if(TER[(j+1)*G+i]===3&&rnd()<0.12)PIER[j*G+i]=4}
+  for(let k=0;k<6;k++){                                   // parks
+    const pi=6+(rnd()*(G-26)|0),pj=6+(rnd()*(G-26)|0),pw=5+(rnd()*9|0),ph=5+(rnd()*9|0);
+    for(let j=pj;j<pj+ph;j++)for(let i=pi;i<pi+pw;i++)
+      if(!TER[j*G+i]&&!RI[i]&&!RJ[j])TER[j*G+i]=2}
+  for(let j=0;j<G;j++)for(let i=0;i<G;i++)                // park trees (sprites)
+    if(TER[j*G+i]===2&&rnd()<0.5)
+      TREES.push({x:i+0.2+rnd()*0.6,z:j+0.2+rnd()*0.6,h:0.45+rnd()*0.45});
+  const dt=[[G*0.5,G*0.5],[G*0.3,G*0.62],[G*0.72,G*0.34]];
+  const baseH=(i,j)=>{let m=0;for(const[cx,cy]of dt){
+    const d=((i-cx)**2+(j-cy)**2)/(G*G*0.012);m=Math.max(m,Math.exp(-d))}
+    return 8+52*m};
+  let nb=1;
+  for(let j=0;j<G;j++)for(let i=0;i<G;i++){
+    if(RI[i]||RJ[j]||TER[j*G+i]||BID[j*G+i])continue;
+    if(rnd()<0.06){BID[j*G+i]=-1;continue}
+    const w=1+(rnd()<0.5?0:rnd()<0.6?1:2), d=1+(rnd()<0.5?0:rnd()<0.6?1:2);
+    const ok=[];
+    for(let dj=0;dj<d;dj++)for(let di=0;di<w;di++){
+      const ii=i+di,jj=j+dj;
+      if(ii>=G||jj>=G||RI[ii]||RJ[jj]||TER[jj*G+ii]||BID[jj*G+ii])continue;
+      ok.push(jj*G+ii)}
+    if(!ok.length)continue;
+    let h=baseH(i,j)*(0.6+rnd()*0.9);
+    if(rnd()<0.15)h=4+rnd()*5;                            // few small ones
+    else if(rnd()<0.14)h=14+rnd()*16;                     // scattered mid-rises
+    if(rnd()<0.04)h=42+rnd()*18;
+    h=Math.max(3,Math.min(60,h))|0;
+    const id=nb++;
+    for(const c of ok){BID[c]=id;HGT[c]=h}
+    if(ok.length>=6&&h>=18)                               // stepped setbacks on big towers
+      for(const c of ok)if(hash2(c,5)<0.45)HGT[c]=Math.max(6,(h*0.55)|0);
+    if(ok.length>=4&&h>=8&&rnd()<0.75)                    // tower-on-tower tiers
+      HGT[ok[(rnd()*ok.length)|0]]=Math.min(60,h+(h>=20?4+(rnd()*4|0):3+(rnd()*3|0)));
+  }
+  for(let j=47;j<75;j++)for(let i=59;i<87;i++){           // the Mako reactor megastructure
+    const d=Math.hypot(i+0.5-72.5,j+0.5-60.5), c=j*G+i;
+    if(d>13)continue;
+    TER[c]=0;PIER[c]=0;
+    const a=Math.atan2(j+0.5-60.5,i+0.5-72.5);
+    const gate=Math.abs(Math.sin(2*a))<0.2;               // cardinal access corridors
+    if(d<3){HGT[c]=78;BID[c]=-3}                          // core tower
+    else if(d<5){HGT[c]=38;BID[c]=-3}                     // high ring
+    else if(d<6.5){HGT[c]=0;BID[c]=-1}                    // inner plaza
+    else if(d<8.5){if(gate){HGT[c]=0;BID[c]=-1}
+      else{HGT[c]=22;BID[c]=-4}}                          // massive engine blocks
+    else if(d<10.5){if(gate){HGT[c]=0;BID[c]=-1}
+      else if(Math.abs(Math.sin(4*a))>0.8){HGT[c]=30;BID[c]=-3}  // pylons
+      else{HGT[c]=16;BID[c]=-3}}
+    else{if(!gate&&hash2(i,j)<0.35){HGT[c]=8+((hash2(i*3,j*7)*8)|0);BID[c]=-3}
+      else{HGT[c]=0;BID[c]=-1}}                           // industrial apron
+  }
+  for(let k=0;k<4;k++){                                   // beacon smokestacks
+    const a=Math.PI/4+k*Math.PI/2;
+    const si=(72.5+Math.cos(a)*11.5)|0, sj=(60.5+Math.sin(a)*11.5)|0;
+    HGT[sj*G+si]=52;BID[sj*G+si]=-3}
+  for(let j=1;j<G-1;j++)for(let i=1;i<G-1;i++){           // riverside benches, facing the water
+    if(TER[j*G+i]!==3||hash2(i*9,j*11)>=0.35)continue;
+    let ox=0.5,oz=0.5;
+    if(TER[j*G+i+1]===1)ox=0.72;else if(TER[j*G+i-1]===1)ox=0.28;
+    if(TER[(j+1)*G+i]===1)oz=0.72;else if(TER[(j-1)*G+i]===1)oz=0.28;
+    FURN.push({x:i+ox,z:j+oz,k:3});}
+  for(let j=1;j<G-1;j++)for(let i=1;i<G-1;i++){           // street, courtyard & riverside trees
+    const c=j*G+i;
+    if(BID[c]>0||BID[c]<=-3||(TER[c]&&TER[c]!==3)||RI[i]||RJ[j])continue;
+    const nearRoad=RI[i-1]||RI[i+1]||RJ[j-1]||RJ[j+1];
+    const p=TER[c]===3?0.4:nearRoad?0.5:0.18;
+    if(rnd()<p)TREES.push({x:i+0.2+rnd()*0.6,z:j+0.2+rnd()*0.6,h:0.35+rnd()*0.3});}
+  let tries=0;                                            // the population, on sidewalks
+  while(PEDS.length<420&&tries++<20000){
+    const wx=rnd()*G,wz=rnd()*G;
+    if(walkable(wx,wz))PEDS.push({x:wx,z:wz,a:rnd()*6.28,sp:0.05+rnd()*0.08})}
+  for(let k=0;k<G*G;k++)POPBASE+=HGT[k];
+  POPBASE=POPBASE*37+PEDS.length;
+})();
+const cellH=(x,z)=>(x<0||z<0||x>=G||z>=G)?0:HGT[z*G+x];
+function walkable(nx,nz){          // sidewalks, crosswalks, parks, promenades
+  const ii=nx|0,jj=nz|0;
+  if(ii<=0||jj<=0||ii>=G-1||jj>=G-1)return false;
+  const c=jj*G+ii;
+  if(HGT[c]||TER[c]===1)return false;
+  if(TER[c]===2||TER[c]===3)return true;
+  const ri=RI[ii],rj=RJ[jj];
+  if(!ri&&!rj)return false;
+  if(ri>=3||rj>=3)return false;    // no strolling on the highway
+  if(ri&&rj)return true;           // intersections: crosswalks
+  if(ri){const u=nx-(ii-RIO[ii]);return u<0.25||u>RIW[ii]-0.25}
+  const u=nz-(jj-RJO[jj]);return u<0.25||u>RJW[jj]-0.25;
+}
+
+/* ---------- camera / screen ---------- */
+const FOV=68*Math.PI/180, tanH=Math.tan(FOV/2), MAXD=110, STY=0.18;
+let px=0,pz=0,ang=0,camH=5.0,pitch=0;
+px=48.2;pz=70.5;ang=-1.0;   // over the river, looking upstream at downtown
+let W=0,H=0,CW=6,LH=11,HOR=0,pV=0,CH,CO,GMAX,SKYB,skyGrad;
+let FONT='7px "Menlo","Osaka-Mono",monospace';
+function resize(){
+  const dpr=Math.min(2,window.devicePixelRatio||1);     // render at native resolution
+  cv.width=Math.max(320,Math.round(innerWidth*dpr));
+  cv.height=Math.max(240,Math.round(innerHeight*dpr));
+  cv.style.width=innerWidth+'px';cv.style.height=innerHeight+'px';
+  const fpx=Math.round(6.2*dpr);                        // crisp glyphs, modest cell count
+  FONT=fpx+'px "Menlo","Osaka-Mono",monospace';
+  ctx.font=FONT;CW=Math.max(3,Math.round(ctx.measureText('M').width));
+  LH=Math.round(fpx*1.15);
+  W=Math.ceil(cv.width/CW);H=Math.ceil(cv.height/LH);HOR=(H*0.30)|0;
+  const tanV=tanH*(H*LH)/(W*CW);pV=(H/2)/tanV;
+  CH=new Array(W*H).fill(' ');CO=new Uint8Array(W*H);GMAX=new Float32Array(W);
+  SKYB=new Int16Array(W);
+  buildSky();
+}
+function buildSky(){                                     // near-black night, faint teal horizon
+  skyGrad=ctx.createLinearGradient(0,0,0,Math.max(40,(HOR+7)*LH));
+  skyGrad.addColorStop(0,'#050a12');skyGrad.addColorStop(0.45,'#0a1a20');
+  skyGrad.addColorStop(0.75,'#123a38');skyGrad.addColorStop(1,'#22584a');
+}
+addEventListener('resize',resize);resize();
+function put(x,r,ch,kind,fog){if(r<0||r>=H)return;const i=r*W+x;CH[i]=ch;CO[i]=kind*4+fog}
+const fogOf=d=>d<MAXD*0.35?0:d<MAXD*0.6?1:d<MAXD*0.85?2:3;
+let NOW=0,TB=0;
+/* ---------- wall texture: hue identity, storefronts, blazing floors ---------- */
+function wallTex(x,r,bid,side,wc,ys,h,fog,mxx,mzz){
+  const story=ys|0, fy=ys-story, m=Math.floor(wc*8);
+  if(bid===-2){                                           // park tree: trunk + foliage
+    if(ys<0.5){put(x,r,'|',1,fog);return}
+    put(x,r,hash3(m,story,7)<0.6?'%':':',hash3(m,r,3)<0.5?26:27,fog);return}
+  if(bid===-3){                                           // reactor plating
+    if(ys>h-0.6){put(x,r,'=',8,fog);return}               // mako roofline
+    if(story%5===2&&fy<0.6){const g=hash3(m,story,3);     // glowing vent bands
+      put(x,r,g<0.7?'=':'#',g<0.5?8:9,fog);return}
+    if(((m%6)+6)%6===0){put(x,r,'|',3,fog);return}        // pipework
+    const cu2=Math.floor(wc), panel=hash3(cu2,story>>2,11);
+    if(panel<0.12&&hash3(m,story,13)<0.25){                // scattered work lights
+      put(x,r,'o',panel<0.06?20:9,fog);return}
+    const dd=hash3(m*3,story,7);
+    put(x,r,dd<0.35?'.':dd<0.5?':':dd<0.6?'-':' ',panel<0.35?1:panel<0.6?3:0,fog);return}
+  if(bid===-4){                                           // engine block: glowing intake maw
+    if(ys>h-0.6){put(x,r,'=',2,fog);return}
+    const fu=(wc-Math.floor(wc))-0.5, fyv=(ys-h/2)/(h/2);
+    const rr=Math.hypot(fu*2.4,fyv);
+    if(rr>0.55&&rr<0.8){const g=hash3(m,story,5);
+      put(x,r,g<0.6?'=':'#',g<0.75?8:9,fog);return}       // mako intake ring
+    if(rr<=0.55){put(x,r,hash3(m,story,9)<0.2?'.':' ',0,fog);return}
+    put(x,r,(story&1)?'=':'-',(story&1)?1:3,fog);return}  // heavy hull slats
+  const hk=hueKind(bid);
+  const cellu=Math.floor(wc), mloc=m-cellu*8;
+  const bodyK=30+(((hash2(bid,3)*8)|0)>>1), bK=side?Math.max(30,bodyK-1):bodyK;
+  if(ys>h-0.5){                                                  // roofline + red beacons
+    if(h>=12&&(mloc===0||mloc===7)&&hash3(bid,cellu,7)<0.5){put(x,r,'*',6,fog);return}
+    put(x,r,'=',hash2(bid,31)<0.5?hk:2,fog);return}
+  /* luminous crown: top stories of some tall towers fully lit */
+  const cr=h>=16?(hash2(bid,101)*12)|0:0;
+  if((cr===2||cr===3)&&story>=h-3){
+    const b=hash3(bid,m,story);
+    put(x,r,b<0.6?'#':'=',b<0.12?5:hk,fog);return}
+  /* dark seam where two different buildings meet: separates silhouettes */
+  if(mloc===0||mloc===7){
+    const nu=(((mloc===7?cellu+1:cellu-1)%G)+G)%G;
+    const nb=side===0?BID[nu*G+mxx]:BID[mzz*G+nu];
+    if(nb!==bid){put(x,r,(r&1)?':':'.',0,fog);return}}
+  /* giant animated ad screens */
+  if(h>=14&&hash2(bid,49)<0.2){const s0=(h*0.35)|0;
+    if(story>=s0&&story<=s0+4){
+      const sk=8+2*WPICK[(hash2(bid,53)*16)|0];
+      const flash=((NOW/2600+hash2(bid,9))%1)<0.05;      // occasional full flash
+      const px2=hash3(bid,m-((NOW/130)|0)*2,story*3);    // content scrolls sideways
+      put(x,r,flash?'#':px2<0.55?'#':px2<0.85?'o':':',flash?sk:px2<0.7?sk:sk+1,fog);return}}
+  /* animated rooftop billboards */
+  if(h>=6&&h<=26&&hash2(bid,45)<0.3&&story>=h-3&&story<=h-2){
+    const bk=8+2*WPICK[(hash2(bid,47)*16)|0];
+    const sc3=(((m+((NOW/140)|0))%6)+6)%6;               // scrolling light bands
+    put(x,r,sc3<3?'#':'=',sc3<3?bk:bk+1,fog);return}
+  if(story===0){
+    const com=hash2(bid,55);
+    if(com<0.34){                                                 // commercial: storefront strip
+      const seg=m>>3, sk=8+2*WPICK[(hash3(bid,seg,4)*16)|0];
+      const sh=hash3(bid,m,1);
+      put(x,r,sh<0.4?'#':sh<0.55?'=':sh<0.8?':':'.',sh<0.4?sk:sh<0.55?4:sh<0.8?sk+1:3,fog);return}
+    const dm=hash3(bid,m>>1,6);                                   // quiet lobby: door + a few lights
+    put(x,r,dm<0.05?'#':dm<0.09?'o':dm<0.5?'.':' ',dm<0.05?4:dm<0.09?7:bK,fog);return}
+  /* hanging vertical neon sign, stories 1-4 */
+  if(story>=1&&story<=4&&hash3(bid,cellu,29)<0.28){
+    if(mloc===2+((hash3(bid,cellu,31)*5)|0)){
+      const sk=8+2*WPICK[(hash3(bid,cellu,13)*16)|0];
+      put(x,r,story===4?'+':(fy<0.5?'#':'o'),sk,fog);return}}
+  /* fire escape zigzag near cell edge */
+  if(mloc===0&&story>=1&&story<h-2&&hash2(bid,63)<0.22){
+    put(x,r,(story&1)?'%':'x',3,fog);return}
+  const mm=((m%3)+3)%3, win=(m-mm)/3|0;
+  if(hash3(bid,story>>1,88)<0.06){                                // blazing floors
+    const b=hash3(bid,m,story);
+    put(x,r,b<0.6?'#':'=',b<0.15?5:hk,fog);return}
+  if(fy>0.8){put(x,r,'-',bK,fog);return}                          // floor slab
+  if(mm===2){put(x,r,'.',bK,fog);return}                          // mullion
+  const field=hash3(bid,story>>2,win>>2);       // coherent glowing facade patches
+  const gmul=0.35+hash2(bid,17)*1.2;            // per-building brightness identity
+  const p=(field<0.45?0.85:field<0.75?0.5:0.15)*(story<3?1.2:1)*(side?0.55:1)*gmul;
+  const lit=hash3(bid,story,win*7)<p;
+  if(lit){const b=hash3(bid,win*3,story*5);
+    const wh=hash3(bid,win,9)>=0.7;
+    put(x,r,b<0.08?'@':b<0.5?'o':'"',b<0.08?5:wh?4:(b<0.75?hk:hk+1),fog)}
+  else{const dd=hash3(bid+m,story,2);                             // dense body fill
+    if(dd<0.72)put(x,r,dd<0.4?'.':dd<0.6?',':':',dd<0.68?bK:3,fog);
+    else put(x,r,' ',bK,fog)}
+}
+function roofTex(x,r,ix,iz,fx,fz,h,fog){
+  fx-=G*Math.floor(fx/G);fz-=G*Math.floor(fz/G);ix=fx|0;iz=fz|0;
+  const ux=fx-ix,uz=fz-iz,idx=iz*G+ix,e=0.10;
+  if(BID[idx]===-2){const gx2=(fx*4)|0,gz2=(fz*4)|0;      // tree crown from above
+    put(x,r,hash3(gx2,gz2,5)<0.7?'%':'*',hash3(gx2,gz2,7)<0.5?26:27,fog);return}
+  if(BID[idx]===-3){const rr2=Math.hypot(fx-72.5,fz-60.5)*2.4, fb=rr2-(rr2|0);
+    if(fb<0.18){put(x,r,'=',((rr2|0)%3===0)?8:2,fog);return}   // concentric ring lights
+    put(x,r,hash3((fx*4)|0,(fz*4)|0,3)<0.25?'.':' ',1,fog);return}
+  if(BID[idx]===-4){const g4=hash3((fx*5)|0,(fz*5)|0,4);       // engine roof grating
+    put(x,r,g4<0.3?'#':g4<0.5?':':'.',g4<0.3?3:1,fog);return}
+  const crown=h>=16?(hash2(BID[idx],101)*12)|0:0;
+  if(crown===6){                                          // rooftop garden (rare)
+    if(ux<0.08||ux>0.92||uz<0.08||uz>0.92){put(x,r,'=',2,fog);return}
+    const gx3=(fx*4)|0,gz3=(fz*4)|0;
+    put(x,r,hash3(gx3,gz3,5)<0.25?'%':hash3(gx3,gz3,8)<0.5?'.':' ',27,fog);return}
+  if(crown===7||crown===8){                               // helipad, some with a helicopter
+    const dc=Math.hypot(ux-0.5,uz-0.5);
+    const heli=hash2(BID[idx],107)<0.6;
+    if(heli&&dc<0.1){put(x,r,((NOW/150)|0)%2?'+':'x',2,fog);return}   // spinning rotor
+    if(!heli&&dc<0.07){put(x,r,'H',4,fog);return}
+    if(Math.abs(dc-0.3)<0.055){put(x,r,'.',2,fog);return}}
+  if((ux<e&&cellH(ix-1,iz)<h)||(ux>1-e&&cellH(ix+1,iz)<h)||
+     (uz<e&&cellH(ix,iz-1)<h)||(uz>1-e&&cellH(ix,iz+1)<h)){put(x,r,'-',2,fog);return}
+  if(h>=30&&Math.abs(ux-0.5)<0.12&&Math.abs(uz-0.5)<0.12){
+    const on=((NOW/900+hash2(idx,3))%1)<0.5;
+    put(x,r,on?'*':'+',on?6:3,fog);return}
+  const wt=hash2(idx,21);
+  if(wt<0.10&&Math.hypot(ux-0.32,uz-0.68)<0.13){put(x,r,'O',3,fog);return}  // water tank
+  if(hash2(idx,23)<0.18&&Math.hypot(ux-0.72,uz-0.28)<0.06){put(x,r,'+',2,fog);return} // mast
+  const gx=(fx*3)|0,gz=(fz*3)|0;
+  if(hash2(idx,27)<0.03&&ux>0.55&&uz>0.55){                       // roof garden corner
+    put(x,r,hash3(gx,gz,9)<0.35?'%':'.',hash3(gx,gz,11)<0.5?26:27,fog);return}
+  if(hash2(gx*7+1,gz*5+3)<0.07){put(x,r,'#',3,fog);return}        // AC / vents
+  const dd=hash3(gx,gz,1);
+  put(x,r,dd<0.22?'.':dd<0.32?',':' ',1,fog);
+}
+function groundTex(x,r,fx,fz,fog){
+  fx-=G*Math.floor(fx/G);fz-=G*Math.floor(fz/G);          // wrapped world
+  const ix=fx|0,iz=fz|0;
+  const ter=TER[iz*G+ix], ri=RI[ix], rj=RJ[iz], t=Math.max(ri,rj);
+  const bridged=(ri&&BRI[ix])||(rj&&BRJ[iz]);
+  if(ter===1&&!bridged){                                          // open water
+    const pr=PIER[iz*G+ix];
+    if(pr){const ux4=fx-ix,uz4=fz-iz;                             // piers off the banks
+      const on=pr<=2?(Math.abs(uz4-0.5)<0.16&&(pr===1?ux4<0.85:ux4>0.15))
+                    :(Math.abs(ux4-0.5)<0.16&&(pr===3?uz4<0.85:uz4>0.15));
+      if(on){const pk=hash2((fx*6)|0,(fz*6)|0);
+        put(x,r,pk<0.1?'o':pk<0.6?'=':':',pk<0.1?7:29,fog);return}}
+    const wv=hash3((fx*3)|0,(fz*3)|0,TB&7);
+    if(wv<0.28){put(x,r,'~',wv<0.09?24:25,fog);return}
+    const rc=(fx*6)|0;
+    if(hash2(rc,7)<0.12&&hash3(rc,(fz*2)|0,1)<0.55){
+      const hs=hash2(rc,3);
+      put(x,r,':',hs<0.4?9:hs<0.7?13:21,fog);return}
+    put(x,r,wv<0.5?'.':' ',25,fog);return}
+  if(t){                                                          // roads & bridges
+    const ax=ri>=rj;
+    const u=ax?(fx-(ix-RIO[ix])):(fz-(iz-RJO[iz]));
+    const wd=ax?RIW[ix]:RJW[iz], lg=ax?fz:fx;
+    if(ter===1&&(u<0.12||u>wd-0.12)){put(x,r,'=',2,fog);return}   // bridge railing
+    if(ri&&rj&&ter!==1){                                          // intersection
+      const fu=fx-ix, fv=fz-iz, cyc=(NOW/3000+hash2(ix,iz))%1;
+      if(fu<0.14&&fv<0.14){put(x,r,'o',cyc<0.45?26:cyc<0.55?8:6,fog);return} // traffic light
+      if((fu<0.22||fu>0.78)&&((fz*4)|0)%2===0){put(x,r,':',2,fog);return}    // crosswalk
+      if((fv<0.22||fv>0.78)&&((fx*4)|0)%2===0){put(x,r,':',2,fog);return}}
+    /* street lamps every 2 units: glowing pools on the pavement */
+    const ll=Math.round(lg/2)*2, lu=u<wd/2?0.14:wd-0.14;
+    const dl=Math.hypot(lg-ll,u-lu);
+    if(dl<0.5&&t<3){
+      if(dl<0.06){put(x,r,'*',5,fog);return}
+      const b=1-dl/0.5, pv=hash2((fx*7)|0,(fz*7)|0);
+      if(pv<b*0.9){put(x,r,pv<b*0.35?'#':pv<b*0.6?':':'.',pv<b*0.25?7:9,fog);return}}
+    if(t<3&&ter!==1&&(u<0.25||u>wd-0.25)){                        // sidewalk + furniture
+      const fu=hash2((lg*2)|0,(ax?ix:iz)*3);
+      if(fu<0.03){put(x,r,'#',19,fog);return}                     // postal box
+      if(fu<0.055){put(x,r,'*',5,fog);return}                     // street lamp
+      if(fu<0.08){put(x,r,'o',9+2*((fu*997|0)%8),fog);return}     // vending glow
+      const sg=hash2((fx*6)|0,(fz*6)|0);
+      put(x,r,sg<0.5?':':'.',sg<0.15?28:29,fog);return}
+    if(t===2&&Math.abs(u-wd/2)<0.05){put(x,r,':',9,fog);return}   // avenue center line
+    if(t===3){                                                    // highway
+      if(Math.abs(u-wd/2)<0.07){put(x,r,'=',1,fog);return}        // median
+      if((u>0.15&&u<0.24)||(u>wd-0.24&&u<wd-0.15)){put(x,r,':',3,fog);return}}
+    const lanes=t===1?[0.5]:t===2?[wd*0.27,wd*0.73]:[wd*0.3,wd*0.7];
+    for(const lc of lanes)if(Math.abs(u-lc)<0.04&&(lg*1.6)%1<0.22){
+      put(x,r,'.',3,fog);return}                                  // small white dashes
+    if(hash2((fx*2)|0,(fz*2)|0)<0.015){put(x,r,'o',1,fog);return} // manhole
+    put(x,r,hash2((fx*4)|0,(fz*4)|0)<0.15?'.':' ',0,fog);return}
+  if(ter===3){                                                    // riverside promenade
+    const ux3=fx-ix,uz3=fz-iz;
+    if((TER[iz*G+ix+1]===1&&ux3>0.82)||(TER[iz*G+ix-1]===1&&ux3<0.18)||
+       (TER[(iz+1)*G+ix]===1&&uz3>0.82)||(TER[(iz-1)*G+ix]===1&&uz3<0.18)){
+      put(x,r,'=',2,fog);return}                                  // railing at the water
+    if(hash2((fx*2)|0,(fz*2)|0)<0.03){put(x,r,'*',5,fog);return}  // lamps
+    const sg=hash2((fx*6)|0,(fz*6)|0);
+    put(x,r,sg<0.45?':':sg<0.8?'.':' ',sg<0.12?28:29,fog);return}
+  if(ter===2){                                                    // park: lawn + paths
+    if(((fx*0.5+fz*0.5)%3)<0.22){put(x,r,':',3,fog);return}
+    const tv=hash2((fx*5)|0,(fz*5)|0);
+    put(x,r,tv<0.25?'.':tv<0.4?',':' ',27,fog);return}
+  const ux2=fx-ix,uz2=fz-iz;                              // contact shadow at building feet
+  if(((ux2<0.3&&cellH(ix-1,iz)>2)||(ux2>0.7&&cellH(ix+1,iz)>2)||
+      (uz2<0.3&&cellH(ix,iz-1)>2)||(uz2>0.7&&cellH(ix,iz+1)>2))){
+    put(x,r,' ',0,fog);return}
+  const hh=hash2((fx*4)|0,(fz*4)|0);
+  put(x,r,hh<0.2?',':hh<0.35?'.':' ',0,fog);
+}
+
+/* ---------- aerial column renderer with light-trail beams ---------- */
+function renderColumn(x,dirX,dirZ,plX,plZ){
+  const cxs=2*x/W-1, rdx=dirX+plX*cxs, rdz=dirZ+plZ*cxs;
+  let mx=px|0,mz=pz|0;
+  const ddx=Math.abs(1/(rdx||1e-9)),ddz=Math.abs(1/(rdz||1e-9));
+  const sx=rdx<0?-1:1, sz=rdz<0?-1:1;
+  let tx=(rdx<0?(px-mx):(mx+1-px))*ddx, tz=(rdz<0?(pz-mz):(mz+1-pz))*ddz;
+  let bot=H-1, dCur=0.02, side=0, gmax=0, wasW=false;
+  while(bot>=0&&dCur<MAXD){
+    let dNext,nSide;
+    if(tx<tz){dNext=tx;nSide=0}else{dNext=tz;nSide=1}
+    const mxx=((mx%G)+G)%G, mzz=((mz%G)+G)%G, ci=mzz*G+mxx;  // world wraps: endless city
+    const h=HGT[ci];
+    if(h===0&&(RI[mxx]===3||RJ[mzz]===3)){        // elevated highway deck
+      wasW=false;
+      const fog=fogOf(dCur), dH=0.5;
+      const rTop=Math.max(0,Math.ceil(HOR+(camH-dH)*pV/dCur));
+      if(dCur>0.05){
+        const wc=side===0?pz+dCur*rdz:px+dCur*rdx;
+        for(let r=Math.min(bot,H-1);r>=rTop;r--){
+          const y=camH-(r-HOR)*dCur/pV;
+          if(y>dH)continue;
+          if(y>0.34)put(x,r,'=',2,fog);          // concrete rim: the deck's thickness
+          else if(y>0.2)put(x,r,'-',1,fog);
+          else{const al=wc-Math.floor(wc);
+            if(al<0.12||al>0.88)put(x,r,'|',1,fog);   // support pillars
+            else put(x,r,hash3((wc*4)|0,r,1)<0.3?',':' ',30,fog)}
+        }
+      }
+      bot=Math.min(bot,rTop-1);
+      const rFar=Math.max(0,Math.ceil(HOR+(camH-dH)*pV/Math.max(0.01,dNext)));
+      for(let r=Math.min(bot,H-1);r>=rFar;r--){
+        const d=(camH-dH)*pV/(r-HOR);
+        groundTex(x,r,px+rdx*d,pz+rdz*d,fogOf(d));
+      }
+      bot=Math.min(bot,rFar-1);gmax=dNext;
+    }else if(h===0){
+      const bridge=(RI[mxx]&&BRI[mxx])||(RJ[mzz]&&BRJ[mzz]);
+      const isW=TER[ci]===1&&!bridge;
+      const lvl=isW?camH+0.5:camH;               // water sits 0.5 below the city
+      if(!isW&&wasW){                            // embankment wall or arched bridge underside
+        const rTopB=Math.max(0,Math.ceil(HOR+camH*pV/dCur));
+        const rBW=Math.min(bot,H-1), fgb2=fogOf(dCur);
+        if(rBW>=rTopB){
+          if(bridge){                            // arches: piers + dark water through the opening
+            const wc2=side===0?pz+dCur*rdz:px+dCur*rdx;
+            const fr2=wc2-Math.floor(wc2), pierC=fr2<0.16||fr2>0.84;
+            for(let r=rBW;r>=rTopB;r--){
+              if(r===rTopB)put(x,r,'=',2,fgb2);
+              else if(r===rTopB+1)put(x,r,pierC?':':'_',pierC?29:1,fgb2);
+              else if(pierC)put(x,r,hash2(x,r)<0.5?':':'|',29,fgb2);
+              else put(x,r,hash3(x,r,TB&7)<0.12?'~':' ',25,fgb2);
+            }
+          }else{                                 // embankment with iron railing bars above
+            for(let r=rBW;r>=rTopB;r--){
+              if(r===rTopB)put(x,r,'=',2,fgb2);
+              else put(x,r,hash2(x*7,r*3)<0.16?'|':hash2(x,r)<0.45?':':'.',29,fgb2);
+            }
+            if(rTopB-1>=0&&x%3===0){put(x,rTopB-1,'|',3,fgb2);bot=Math.min(bot,rTopB-2)}
+          }
+          bot=Math.min(bot,rTopB-1);
+        }
+      }
+      const rFar=Math.max(0,Math.ceil(HOR+lvl*pV/Math.max(0.01,dNext)));
+      const rB3=Math.min(bot,H-1);
+      if(TER[ci]===1&&rB3>=rFar)FBGB[(isW?200:204)+fogOf(dCur)].push(x,rFar,rB3);
+      for(let r=rB3;r>=rFar;r--){
+        const d=lvl*pV/(r-HOR);
+        groundTex(x,r,px+rdx*d,pz+rdz*d,fogOf(d));
+      }
+      bot=Math.min(bot,rFar-1);gmax=dNext;wasW=isW;
+    }else{
+      wasW=false;
+      const fog=fogOf(dCur), hw2=h*STY;
+      const rTop=Math.max(0,Math.ceil(HOR+(camH-hw2)*pV/dCur));
+      {
+        const wc=side===0?pz+dCur*rdz:px+dCur*rdx;
+        const bid=BID[ci];
+        const rB=Math.min(bot,H-1);
+        if(bid===-2&&rB>=rTop)FBGB[196+fog].push(x,rTop,rB);   // foliage backdrop
+        if(bid!==-2&&rB>=rTop){          // skylight-graded facade backdrop, even point-blank
+          const tone=(hash2(bid<0?ci*7:bid,3)*8)|0, fgb=tone*24+(side?12:0)+fog;
+          const dc=Math.max(dCur,0.05);
+          const r1=Math.max(rTop,Math.ceil(HOR+(camH-0.65*hw2)*pV/dc));
+          const r2=Math.max(r1,Math.ceil(HOR+(camH-0.30*hw2)*pV/dc));
+          if(r1>rTop)FBGB[fgb].push(x,rTop,Math.min(r1-1,rB));
+          if(r2>r1&&r1<=rB)FBGB[fgb+4].push(x,r1,Math.min(r2-1,rB));
+          if(r2<=rB)FBGB[fgb+8].push(x,Math.max(r2,rTop),rB);
+        }
+        if(dCur>0.05)for(let r=rB;r>=rTop;r--){
+          const y=camH-(r-HOR)*dCur/pV;
+          if(y<=hw2)wallTex(x,r,bid,side,wc,y/STY,h,fog,mxx,mzz);
+        }
+        /* light trails rising off the roofline */
+        if(rTop<=bot&&rTop>0&&h>=5){
+          const cr2=h>=16?(hash2(bid,101)*12)|0:0;
+          if(cr2===4||cr2===5){                           // spire crown
+            const cm=Math.floor(wc*8)-Math.floor(wc)*8;
+            if(cm===3||cm===4){
+              const sl=(4+hash2(bid,103)*12)|0;
+              for(let k=1;k<=sl;k++){const r2=rTop-k;if(r2<0)break;put(x,r2,'|',3,fog)}
+              const on=((NOW/900+hash2(bid,7))%1)<0.5;
+              if(rTop-sl-1>=0)put(x,rTop-sl-1,on?'*':'+',on?6:3,fog)}}
+        }
+      }
+      bot=Math.min(bot,rTop-1);
+      if(hw2<camH){
+        const rFar=Math.max(0,Math.ceil(HOR+(camH-hw2)*pV/Math.max(0.01,dNext)));
+        const rB2=Math.min(bot,H-1);
+        if(rB2>=rFar)FBGB[192+fog].push(x,rFar,rB2);   // roof slab fill
+        for(let r=rB2;r>=rFar;r--){
+          const d=(camH-hw2)*pV/(r-HOR);
+          roofTex(x,r,mxx,mzz,px+rdx*d,pz+rdz*d,h,fogOf(d));
+        }
+        bot=Math.min(bot,rFar-1);
+      }
+    }
+    if(nSide===0){dCur=tx;tx+=ddx;mx+=sx}else{dCur=tz;tz+=ddz;mz+=sz}
+    side=nSide;
+  }
+  GMAX[x]=gmax;SKYB[x]=Math.min(bot,H-1);
+  /* layered night sky: drifting clouds with lit edges, sparse stars */
+  const wcf=(ang/FOV)*W+x, drift=NOW*0.00003;            // near-still cloud drift
+  for(let r=Math.min(SKYB[x],H-1);r>=0;r--){
+    if(CH[r*W+x]!==' ')continue;
+    const n=vn(wcf*0.055+drift,r*0.10)*0.65+vn(wcf*0.14+40,r*0.22+drift*2)*0.35;
+    const thr=0.62+(HOR>0?(r/Math.max(1,HOR)):1)*0.14;   // sparser, fainter clouds
+    if(n>thr){
+      const d2=n-thr;
+      if(hash2(x*3,r*7)<0.75)put(x,r,d2>0.12?':':'.',d2>0.05?34:35,2);
+    }else if(hash2((wcf)|0,r)<0.013){                    // starfield
+      const sb=hash3((wcf)|0,r,5);
+      put(x,r,sb<0.12?'*':'.',sb<0.12?5:sb<0.5?35:3,sb<0.3?1:2)}
+  }
+}
+
+/* ---------- traffic & planes ---------- */
+const cars=[];
+function spawnLine(ax,i,t){
+  const n=t===3?6:t===2?3:1;
+  for(let k=0;k<n;k++){const dir=t===1?(hash2(i,9)<0.5?1:-1):(k%2?1:-1);
+    cars.push({ax,i0:i,t:rnd()*G,dir,ty:t,
+      sp:t===3?1.6+rnd()*0.6:t===2?0.8+rnd()*0.4:0.5+rnd()*0.25})}
+  if(t===2)for(let k=0;k<2;k++)                       // buses on avenues
+    cars.push({ax,i0:i,t:rnd()*G,dir:k?1:-1,ty:t,bus:1,sp:0.55+rnd()*0.2});
+}
+for(let i=4;i<G-4;i++){
+  if(RI[i]&&RIO[i]===0)spawnLine(0,i,RI[i]);
+  if(RJ[i]&&RJO[i]===0)spawnLine(1,i,RJ[i]);
+}
+function laneOff(c){return c.ty===1?0.5:c.ty===2?(c.dir>0?c.ty*0.27:c.ty*0.73)
+  :(c.dir>0?c.ty*0.3:c.ty*0.7)}
+const planes=[];
+for(let k=0;k<3;k++)planes.push({x:rnd()*G,z:rnd()*G,a:rnd()*6.28,alt:10+rnd()*8,sp:3+rnd()*2});
+for(let k=0;k<2;k++)planes.push({x:rnd()*G,z:rnd()*G,a:rnd()*6.28,alt:7+rnd()*3,sp:1.2+rnd(),heli:1});
+const boats=[];
+for(let k=0;k<4;k++)boats.push({t:10+rnd()*(G-20),dir:rnd()<0.5?1:-1,sp:0.6+rnd()*0.6});
+const riverX=z=>G*0.42+Math.sin(z*0.09)*9+z*0.12;
+
+/* ---------- input ---------- */
+const keys={};let showMap=true,drag=null;
+addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=1;
+  if(e.key.toLowerCase()==='m')showMap=!showMap;
+  if(!e.metaKey&&e.key!=='F12')e.preventDefault()});
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=0);
+addEventListener('mousemove',e=>{                  // drag to look: grab the world
+  if(drag){ang=drag.a-(e.clientX-drag.x)*0.0038;
+    pitch=Math.max(-1.5,Math.min(1.9,drag.p+(e.clientY-drag.y)*0.0016))}});
+let web=null,airborne=false;
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+function webTry(cxp,cyp){                          // raycast a web line at the cursor
+  const col=cxp*(cv.width/innerWidth)/CW, row=cyp*(cv.height/innerHeight)/LH;
+  const cxs=2*col/W-1;
+  const dX=Math.cos(ang),dZ=Math.sin(ang);
+  const rdx=dX+(-dZ*tanH)*cxs, rdz=dZ+(dX*tanH)*cxs;
+  const slope=(HOR-row)/pV;
+  for(let t=1.2;t<46;t+=0.3){
+    const wx=px+rdx*t, wz=pz+rdz*t, wy=camH+slope*t;
+    if(wy<0.1)break;
+    const ii=((Math.floor(wx)%G)+G)%G, jj=((Math.floor(wz)%G)+G)%G;
+    if(HGT[jj*G+ii]*STY>=wy){
+      web={x:wx,y:wy,z:wz,len:Math.max(2,Math.hypot(wx-px,wy-camH,wz-pz)*0.97)};
+      airborne=true;return}
+  }
+}
+cv.addEventListener('pointerdown',e=>{
+  if(e.button===2){webTry(e.clientX,e.clientY);return}
+  drag={x:e.clientX,y:e.clientY,a:ang,p:pitch};cv.setPointerCapture(e.pointerId)});
+cv.addEventListener('pointerup',e=>{if(e.button===2){web=null;return}drag=null});
+addEventListener('wheel',e=>{e.preventDefault();       // trackpad two-finger look
+  ang+=e.deltaX*0.0025;
+  pitch=Math.max(-1.5,Math.min(1.9,pitch-e.deltaY*0.0022));
+},{passive:false});
+let velX=0,velZ=0,velH=0;
+const GRAV=2.6;
+function move(dt){
+  const run=keys['shift']?3:1;
+  if(keys['arrowleft'])ang-=1.8*dt; if(keys['arrowright'])ang+=1.8*dt;
+  if(keys['arrowup'])pitch=Math.min(1.9,pitch+0.8*dt);
+  if(keys['arrowdown'])pitch=Math.max(-1.5,pitch-0.8*dt);
+  const c=Math.cos(ang),s=Math.sin(ang);let fx=0,fz=0,fh=0;
+  if(keys['w']){fx+=c;fz+=s} if(keys['s']){fx-=c;fz-=s}
+  if(keys['a']){fx+=s;fz-=c} if(keys['d']){fx-=s;fz+=c}
+  if(keys['r']||keys[' '])fh+=1; if(keys['f']||keys['control'])fh-=1;
+  const l=Math.hypot(fx,fz)||1;
+  if(web||airborne){                                     // swing / ballistic physics
+    velH-=GRAV*dt;
+    velX+=(fx/l)*4*dt; velZ+=(fz/l)*4*dt;                // gentle air control
+    velH+=fh*3*dt;
+    px+=velX*dt; pz+=velZ*dt; camH+=velH*dt;
+    if(web){                                             // rope constraint (pendulum)
+      let dx=px-web.x,dz=pz-web.z;
+      dx-=G*Math.round(dx/G);dz-=G*Math.round(dz/G);
+      const dy=camH-web.y, d=Math.hypot(dx,dy,dz);
+      if(d>web.len){
+        const nx=dx/d,ny=dy/d,nz=dz/d;
+        px=web.x+nx*web.len+(px-web.x-dx); pz=web.z+nz*web.len+(pz-web.z-dz);
+        camH=web.y+ny*web.len;
+        const vr=velX*nx+velH*ny+velZ*nz;
+        if(vr>0){velX-=vr*nx;velH-=vr*ny;velZ-=vr*nz}
+      }
+      web.len=Math.max(2.5,web.len-2.0*dt);              // slow reel-in
+    }
+    const minH=cellH(px|0,pz|0)*STY+1.2;
+    if(camH<=minH&&velH<=0){camH=minH;velH=0;airborne=false;web=null}  // landed
+    if(camH>18){camH=18;velH=Math.min(velH,0)}
+  }else{
+    const sp=(7+camH*0.8)*run;
+    const k=1-Math.exp(-dt*7);                           // inertia: ease in and out
+    velX+=((fx/l)*sp-velX)*k; velZ+=((fz/l)*sp-velZ)*k;
+    velH+=(fh*(4+camH*0.35)*run-velH)*k;
+    px+=velX*dt; pz+=velZ*dt; camH+=velH*dt;
+    camH=Math.max(cellH(px|0,pz|0)*STY+1.2,Math.min(18,camH));
+  }
+  px=((px%G)+G)%G;pz=((pz%G)+G)%G;                       // endless city: wrap around
+}
+
+/* ---------- frame ---------- */
+let last=performance.now(),lastTB=-1;
+const popEl=document.getElementById('pop');
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000);last=now;NOW=now;TB=(now/500)|0;
+  move(dt);
+  const nh=Math.round(H*(0.30+pitch));   // pitch shears the horizon: down at feet, up at sky
+  if(nh!==HOR){HOR=nh;buildSky()}
+  for(const c of cars){                                  // traffic holds at red lights
+    const ahead=c.t+c.dir*0.55;
+    const ii=c.ax?(ahead|0):c.i0, jj=c.ax?c.i0:(ahead|0);
+    const cross=c.ax?RI[ii]:RJ[jj];
+    if(cross){const cyc=(NOW/3000+hash2(ii,jj))%1;
+      if(!(c.ax?(cyc>=0.5&&cyc<0.95):(cyc<0.45)))continue}
+    c.t+=c.dir*c.sp*dt;if(c.t>G-1)c.t=1;if(c.t<1)c.t=G-1}
+  for(const p of planes){p.x+=Math.cos(p.a)*p.sp*dt;p.z+=Math.sin(p.a)*p.sp*dt;
+    p.x=((p.x%G)+G)%G;p.z=((p.z%G)+G)%G}
+  for(const b of boats){b.t+=b.dir*b.sp*dt;if(b.t>G-8)b.t=8;if(b.t<8)b.t=G-8}
+  for(const p of PEDS){                                  // people keep to the sidewalks
+    if(hash3((p.x*50)|0,(p.z*50)|0,TB)<0.02)p.a+=(hash2((p.x*99)|0,TB)-0.5)*2;
+    const nx=p.x+Math.cos(p.a)*p.sp*dt, nz=p.z+Math.sin(p.a)*p.sp*dt;
+    if(walkable(nx,nz)){p.x=nx;p.z=nz}
+    else p.a+=2.1;
+  }
+  if(TB!==lastTB){lastTB=TB;                             // live population counter
+    popEl.textContent='POP. '+(POPBASE+((NOW/500|0)*7)%97).toLocaleString()}
+  CH.fill(' ');CO.fill(0);
+  for(const b of FBGB)b.length=0;
+  const dirX=Math.cos(ang),dirZ=Math.sin(ang),plX=-dirZ*tanH,plZ=dirX*tanH;
+  const invDet=1/(plX*dirZ-dirX*plZ);
+  for(const p of planes){                     // planes first: city occludes them
+    let rx=p.x-px,rz=p.z-pz;
+    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+    const t1=invDet*(dirZ*rx-dirX*rz), ty=invDet*(-plZ*rx+plX*rz);
+    if(ty<3)continue;
+    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<5||sxc>=W-5)continue;
+    const r=(HOR+(camH-p.alt)*pV/ty)|0;
+    if(p.heli){                                       // helicopter: rotor + body + tail light
+      put(sxc,r-1,((NOW/150)|0)%2?'+':'x',2,1);
+      put(sxc,r,'o',3,1);
+      if((NOW/500|0)%2)put(sxc+1,r,'*',6,1);
+      continue}
+    const w2=Math.max(1,Math.min(4,(pV*0.22/ty)|0));  // wingspan by distance
+    for(let k=-w2;k<=w2;k++)put(sxc+k,r,k===0?'+':'=',k===0?5:3,1);
+    if(w2>=2){put(sxc,r-1,'-',3,1);put(sxc,r+1,'-',3,1)}
+    const blink=(NOW/700|0)%2;
+    put(sxc-w2-1,r,blink?'*':'.',6,1);                // red nav light
+    put(sxc+w2+1,r,blink?'.':'*',blink?3:26,1);       // green nav light
+  }
+  for(let x=0;x<W;x++)renderColumn(x,dirX,dirZ,plX,plZ);
+  {                                           // distant planets, fixed in the sky
+    const drawPlanet=(A,EL,R,bodyK,rimK,ring)=>{
+      let da=A-ang;da=Math.atan2(Math.sin(da),Math.cos(da));
+      if(Math.abs(da)>FOV*0.95)return;
+      const colC=(0.5+da/FOV)*W, rowC=HOR-EL;
+      const Rv=Math.max(2,R*CW/LH);
+      for(let cxx=Math.max(0,(colC-R*1.7)|0);cxx<=Math.min(W-1,(colC+R*1.7)|0);cxx++)
+      for(let r=Math.max(0,(rowC-Rv-2)|0);r<=Math.min(H-1,(rowC+Rv+2)|0);r++){
+        if(CH[r*W+cxx]!==' ')continue;
+        const dx=(cxx-colC)/R, dy=(r-rowC)/Rv, rr=dx*dx+dy*dy;
+        if(rr<=1){
+          const b=1-rr*0.55-(dx*0.25+dy*0.3);
+          put(cxx,r,b>0.72?'@':b>0.5?'O':b>0.3?'o':b>0.15?':':'.',b>0.45?rimK:bodyK,1);
+        }else if(ring&&Math.abs((r-rowC)-(cxx-colC)*0.14)<1&&Math.abs(dx)<1.65)
+          put(cxx,r,'=',rimK,1);
+      }
+    };
+    drawPlanet(2.2,(H*0.34)|0,6,3,35,false);   // pale moon
+    drawPlanet(-1.1,(H*0.52)|0,11,17,16,true); // ringed giant
+    drawPlanet(0.6,(H*0.62)|0,3,23,22,false);  // small red planet
+    drawPlanet(-2.4,(H*0.42)|0,4,3,35,false);  // far moon
+    drawPlanet(1.35,(H*0.7)|0,2,19,18,false);  // tiny white world
+  }
+  for(const c of cars){
+    const off=laneOff(c);
+    const wx=c.ax?c.t:c.i0+off, wz=c.ax?c.i0+off:c.t;
+    if(TER[(wz|0)*G+(wx|0)]===1&&!(c.ax?BRJ[c.i0]:BRI[c.i0]))continue; // no bridge, no crossing
+    if(cellH(wx|0,wz|0)>0)continue;                        // never render inside a structure
+    let rx=wx-px,rz=wz-pz;
+    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+    const t1=invDet*(dirZ*rx-dirX*rz), ty=invDet*(-plZ*rx+plX*rz);
+    if(ty<1.5)continue;
+    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<0||sxc>=W||ty>GMAX[sxc]+1.5)continue;
+    const toward=((c.ax?dirX:dirZ)*c.dir)<0;
+    const r=(HOR+(camH-(c.ty===3?0.56:0.06))*pV/ty)|0;   // highway cars ride the deck
+    if(c.bus){const fg=fogOf(ty);
+      put(sxc-1,r,'=',7,fg);put(sxc,r,'=',4,fg);put(sxc+1,r,'=',7,fg)}
+    else put(sxc,r,'=',toward?5:6,fogOf(ty));
+  }
+  for(const b of boats){                      // river boats
+    const wz=b.t, wx=riverX(wz);
+    let rx=wx-px,rz=wz-pz;
+    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+    const t1=invDet*(dirZ*rx-dirX*rz), ty=invDet*(-plZ*rx+plX*rz);
+    if(ty<2)continue;
+    const sxc=((W/2)*(1+t1/ty))|0;
+    if(sxc<1||sxc>=W-1||ty>GMAX[sxc]+1.5)continue;
+    const r=(HOR+(camH+0.42)*pV/ty)|0, fg=fogOf(ty);   // boats float on the lowered water
+    put(sxc-2,r,'<',3,fg);put(sxc-1,r,'=',3,fg);put(sxc,r,'=',3,fg);put(sxc+1,r,'>',3,fg);
+    put(sxc,r-1,'o',5,fg);                                 // cabin light
+    const wk=b.dir>0?-3:2;                                 // wake trail
+    put(sxc+wk,r,'~',25,fg);put(sxc+wk+(b.dir>0?-1:1),r,'~',25,fg);
+  }
+  for(const t of TREES){                      // small canopy-on-trunk tree sprites
+    let rx=t.x-px,rz=t.z-pz;
+    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+    const ty=invDet*(-plZ*rx+plX*rz);if(ty<1.2||ty>38)continue;
+    const t1=invDet*(dirZ*rx-dirX*rz);
+    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<-14||sxc>W+14)continue;
+    const rG=HOR+camH*pV/ty, rT=HOR+(camH-t.h)*pV/ty;
+    const hw3=Math.min(14,Math.max(1,((0.30*(W/2))/(tanH*ty))|0)), fg=fogOf(ty);
+    for(let dx=-hw3;dx<=hw3;dx++){
+      const cx2=sxc+dx;if(cx2<0||cx2>=W||ty>GMAX[cx2]+1.2)continue;
+      for(let r=Math.max(0,rT|0);r<=Math.min(H-1,rG|0);r++){
+        const fr=(r-rT)/(rG-rT+0.001), ex=dx/(hw3+0.5);
+        if(fr>0.78){if(dx===0)put(cx2,r,'|',1,fg);continue}   // trunk
+        const ey=(fr-0.38)/0.44;
+        if(ex*ex+ey*ey>1)continue;
+        const dth=hash3(cx2*3,r*5,(t.x*7)|0);
+        if(dth<0.8)put(cx2,r,dth<0.5?'%':dth<0.65?'*':':',dth<0.6?27:26,fg);
+        else put(cx2,r,' ',0,fg);              // solid canopy: no see-through
+      }
+    }
+  }
+  for(const f of FURN){                       // 3d-scaled furniture sprites
+    let rx=f.x-px,rz=f.z-pz;
+    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.8||ty>16)continue;
+    const t1=invDet*(dirZ*rx-dirX*rz);
+    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<1||sxc>=W-2||ty>GMAX[sxc]+1)continue;
+    const rG2=Math.min(H-1,(HOR+camH*pV/ty)|0), fg=fogOf(ty);
+    const wCols=Math.max(0,Math.min(2,(0.05*(W/2)/(tanH*ty))|0));  // extra girth up close
+    if(f.k===0){                              // lamppost: pole, arm, warm head, halo
+      const rTp=Math.max(0,(HOR+(camH-0.28)*pV/ty)|0);
+      for(let r=rTp+1;r<=rG2;r++)put(sxc,r,'|',1,fg);
+      put(sxc,rTp,'o',7,fg);
+      if(wCols>0){put(sxc+1,rTp,'-',1,fg);put(sxc-1,rTp,'.',9,fg);put(sxc+2,rTp,'.',9,fg)}
+    }else if(f.k===1){                        // neon signboard on a post
+      const rTp=Math.max(0,(HOR+(camH-0.22)*pV/ty)|0);
+      for(let r=rTp+1;r<=rG2;r++)put(sxc,r,'|',1,fg);
+      put(sxc,rTp,'#',f.hu,fg);put(sxc+1,rTp,'#',f.hu+1,fg);
+      if(wCols>0&&rTp>0){put(sxc,rTp-1,'#',f.hu+1,fg);put(sxc+1,rTp-1,'#',f.hu,fg)}
+    }else if(f.k===2){                        // garbage can: lid + body
+      const rS=Math.max(0,(HOR+(camH-0.05)*pV/ty)|0);
+      put(sxc,rS,'=',1,fg);
+      for(let r=rS+1;r<=rG2;r++)put(sxc,r,'o',3,fg);
+    }else{                                    // bench: back, seat, legs
+      const rS=Math.max(0,(HOR+(camH-0.06)*pV/ty)|0);
+      for(let d2=0;d2<=1+wCols;d2++){
+        put(sxc+d2,rS,'=',1,fg);
+        if(wCols>0&&rS>0)put(sxc+d2,rS-1,':',1,fg);
+        if(rS+1<=rG2)put(sxc+d2,rS+1,(d2===0||d2===1+wCols)?'|':' ',0,fg);
+      }
+    }
+  }
+  for(const p of PEDS){                       // stick-figure citizens
+    let rx=p.x-px,rz=p.z-pz;
+    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+    if(rx*rx+rz*rz>150)continue;
+    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.7||ty>12)continue;
+    const t1=invDet*(dirZ*rx-dirX*rz);
+    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<0||sxc>=W||ty>GMAX[sxc]+0.8)continue;
+    const rF=Math.min(H-1,(HOR+camH*pV/ty)|0), rH=Math.max(0,(HOR+(camH-0.09)*pV/ty)|0);
+    const fg=fogOf(ty), mid=(rH+rF)>>1;
+    for(let r=rH;r<=rF;r++)put(sxc,r,r===rH?'o':r===mid?'+':'|',r===rH?3:1,fg);
+  }
+  {                                             // the reactor's giant rotating searchlight
+    const th=NOW*0.00045, hTop=78*STY;
+    const dxw=Math.cos(th),dzw=Math.sin(th);
+    let pc=-9999,pr=0;
+    for(let k=0;k<=60;k++){
+      const s=k/60, L=s*46;
+      const wx=72.5+dxw*L, wz=60.5+dzw*L, wy=hTop+L*0.42;
+      let rx=wx-px,rz=wz-pz;
+      rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+      const ty=invDet*(-plZ*rx+plX*rz);if(ty<1.5){pc=-9999;continue}
+      const t1=invDet*(dirZ*rx-dirX*rz);
+      const sxc=Math.round((W/2)*(1+t1/ty));
+      if(sxc<-60||sxc>W+60){pc=-9999;continue}
+      const rC=Math.round(HOR+(camH-wy)*pV/ty);
+      const fg=fogOf(Math.min(ty,MAXD-1));
+      const wdt=1+Math.max(1,(3-2.4*s)|0);      // thick at the source, tapering out
+      if(pc>-9000){
+        const d0=Math.min(pc,sxc),d1=Math.max(pc,sxc);
+        for(let cc=Math.max(0,d0);cc<=Math.min(W-1,d1);cc++){
+          const f2=d1===d0?0:(cc-d0)/(d1-d0);
+          const rr=Math.round(sxc>=pc?pr+(rC-pr)*f2:rC+(pr-rC)*f2);
+          for(let dy=0;dy<wdt;dy++){const r2=rr+dy;
+            if(r2<0||r2>=H)continue;
+            const ci3=r2*W+cc;                            // shines through clouds, not buildings
+            if(CH[ci3]!==' '&&(CO[ci3]>>2)<34)continue;
+            const g=hash3(cc,r2,TB&3);
+            if(g<0.92-s*0.5)put(cc,r2,g<0.4?'#':g<0.7?':':'.',g<0.35?8:9,fg);
+          }
+        }
+      }
+      pc=sxc;pr=rC;
+    }
+  }
+  for(const b of BRIDGES){                    // suspension bridge: towers, cables, suspenders
+    const len=b.e-b.s, steps=Math.max(24,(len*10)|0);
+    const susEv=Math.max(3,Math.round(steps/len));
+    for(let sdi=0;sdi<2;sdi++){                // a cable plane down EACH edge of the deck
+    const off2=(sdi?1:-1)*(b.w||2)*0.35;
+    let pc=-9999,pr=0;
+    for(let k=0;k<=steps;k++){
+      const t=k/steps, w0=b.s+len*t;
+      const wx=b.ax?w0:b.c+off2, wz=b.ax?b.c+off2:w0;
+      let rx=wx-px,rz=wz-pz;
+      rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+      const ty=invDet*(-plZ*rx+plX*rz);if(ty<1.2||ty>45){pc=-9999;continue}
+      const t1=invDet*(dirZ*rx-dirX*rz);
+      const sxc=Math.round((W/2)*(1+t1/ty));
+      if(sxc<-80||sxc>W+80){pc=-9999;continue}
+      const fg=fogOf(ty), tw=0.12, top=0.62;
+      let cy,ch;
+      if(t<tw){cy=0.03+(top-0.03)*(t/tw);ch='/'}          // anchor up to tower
+      else if(t>1-tw){cy=0.03+(top-0.03)*((1-t)/tw);ch='\\'}
+      else{const q=(t-0.5)/(0.5-tw);cy=0.10+(top-0.10)*q*q;   // dip between towers
+        ch=Math.abs(q)>0.7?(t<0.5?'\\':'/'):'-'}
+      const rC=Math.round(HOR+(camH-cy)*pV/ty);
+      if(pc>-9000){                            // rasterize a connected segment
+        const d0=Math.min(pc,sxc),d1=Math.max(pc,sxc);
+        for(let cc=Math.max(0,d0);cc<=Math.min(W-1,d1);cc++){
+          const f2=d1===d0?0:(cc-d0)/(d1-d0);
+          const rr=Math.round(sxc>=pc?pr+(rC-pr)*f2:rC+(pr-rC)*f2);
+          if(ty<=GMAX[cc]+2.5)put(cc,Math.max(0,rr),ch,2,fg);
+        }
+      }else if(sxc>=0&&sxc<W&&ty<=GMAX[sxc]+2.5)put(sxc,Math.max(0,rC),ch,2,fg);
+      pc=sxc;pr=rC;
+      if(sxc>=0&&sxc<W-1&&ty<=GMAX[sxc]+2.5){
+        if(k%susEv===0&&t>tw&&t<1-tw){         // suspender cables down to the deck
+          const rD=Math.min(H-1,Math.round(HOR+(camH-0.03)*pV/ty));
+          for(let r=rC+1;r<rD;r++)put(sxc,r,'|',3,fg)}
+        if(Math.abs(t-tw)<=0.5/steps||Math.abs(t-(1-tw))<=0.5/steps){  // towers at each end
+          const rT2=Math.round(HOR+(camH-0.8)*pV/ty), rD2=Math.min(H-1,Math.round(HOR+camH*pV/ty));
+          for(let r=Math.max(0,rT2);r<=rD2;r++){
+            const tc=(r-rT2)%3===0?'#':'|';
+            put(sxc,r,tc,2,fg);put(sxc+1,r,tc,2,fg)}
+        }
+      }
+    }
+    }
+  }
+  ctx.fillStyle='#000';ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.fillStyle=skyGrad;
+  for(let x=0;x<W;x++)if(SKYB[x]>=0)ctx.fillRect(x*CW,0,CW,(SKYB[x]+1)*LH);
+  for(let i=0;i<FBGB.length;i++){const b=FBGB[i];if(!b.length)continue;
+    ctx.fillStyle=FBGC[i];
+    for(let k=0;k<b.length;k+=3)ctx.fillRect(b[k]*CW,b[k+1]*LH,CW,(b[k+2]-b[k+1]+1)*LH)}
+  ctx.font=FONT;ctx.textBaseline='top';
+  for(let r=0;r<H;r++){
+    let run='',rc=-1,rx0=0;const y=r*LH,off=r*W;
+    for(let x=0;x<W;x++){
+      const ch=CH[off+x];
+      if(ch===' '){if(run)run+=' ';continue}
+      const co=CO[off+x];
+      if(co!==rc||!run){
+        if(run){ctx.fillStyle=FPAL[rc>>2][rc&3];ctx.fillText(run,rx0*CW,y)}
+        run=ch;rc=co;rx0=x}
+      else run+=ch;
+    }
+    if(run){ctx.fillStyle=FPAL[rc>>2][rc&3];ctx.fillText(run,rx0*CW,y)}
+  }
+  ctx.globalCompositeOperation='screen';                 // sky glow blended over the scene
+  ctx.globalAlpha=0.09;
+  ctx.fillStyle=skyGrad;ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+  ctx.fillStyle='rgba(210,255,230,0.45)';                // crosshair
+  ctx.fillRect(cv.width/2-5,cv.height/2,11,1);
+  ctx.fillRect(cv.width/2,cv.height/2-5,1,11);
+  if(web){                                               // the web line
+    let rx=web.x-px,rz=web.z-pz;
+    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+    const t1=invDet*(dirZ*rx-dirX*rz), ty=invDet*(-plZ*rx+plX*rz);
+    if(ty>0.15){
+      const axp=(W/2)*(1+t1/ty)*CW, ayp=(HOR+(camH-web.y)*pV/ty)*LH;
+      const hx2=cv.width/2+cv.width*0.05, hy2=cv.height*0.72;
+      ctx.strokeStyle='rgba(235,250,240,0.85)';
+      ctx.lineWidth=Math.min(4,1+6/ty);
+      ctx.beginPath();ctx.moveTo(hx2,hy2);
+      ctx.quadraticCurveTo((hx2+axp)/2,(hy2+ayp)/2+Math.min(60,cv.height*0.04),axp,ayp);
+      ctx.stroke();
+    }
+  }
+  if(showMap){                                  // circular radar, heading-up, always on
+    const mR=Math.min(96,cv.width*0.085), mcx=cv.width-mR-18, mcy=mR+52;
+    ctx.save();
+    ctx.beginPath();ctx.arc(mcx,mcy,mR,0,7);ctx.clip();
+    ctx.fillStyle='rgba(5,11,9,0.85)';ctx.fillRect(mcx-mR,mcy-mR,2*mR,2*mR);
+    const rng=20, sc=mR/rng;
+    const ca=Math.cos(-ang-Math.PI/2), sa=Math.sin(-ang-Math.PI/2);
+    const fx0=px-(px|0), fz0=pz-(pz|0);
+    for(let dj=-rng;dj<=rng;dj++)for(let di=-rng;di<=rng;di++){
+      if(di*di+dj*dj>rng*rng)continue;
+      const wi=((((px|0)+di)%G)+G)%G, wj=((((pz|0)+dj)%G)+G)%G;
+      const h=HGT[wj*G+wi],tr=TER[wj*G+wi],bd=BID[wj*G+wi];
+      let col=null;
+      if(tr===1)col='#1c3450';
+      else if(tr===2)col='#285030';
+      else if(bd===-3||bd===-4)col='#3fae7a';
+      else if(h)col=h>24?'#c8d4c8':h>10?'#6f7d74':'#37423a';
+      else if(RI[wi]||RJ[wj])col='#151d1a';
+      if(!col)continue;
+      const rx2=di+0.5-fx0, rz2=dj+0.5-fz0;     // sub-cell offset: buttery scrolling
+      ctx.fillStyle=col;
+      ctx.fillRect(mcx+(rx2*ca-rz2*sa)*sc-sc*0.5,mcy+(rx2*sa+rz2*ca)*sc-sc*0.5,sc+0.6,sc+0.6);
+    }
+    ctx.fillStyle='#ffec9e';                    // you, facing up
+    ctx.strokeStyle='rgba(10,20,14,0.9)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(mcx,mcy-11);ctx.lineTo(mcx-7,mcy+8);ctx.lineTo(mcx+7,mcy+8);
+    ctx.closePath();ctx.stroke();ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle='rgba(140,230,180,0.5)';ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.arc(mcx,mcy,mR,0,7);ctx.stroke()}
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+setTimeout(()=>document.getElementById('hint').style.opacity=0.25,9000);
+</script>
+</body>
+</html>
