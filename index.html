@@ -85,7 +85,15 @@ const FBGC=[];
  for(let f=0;f<4;f++){const m=FK[f];                     // 200..203: river water (recessed, dark)
    FBGC.push(`rgb(${8*m|0},${18*m|0},${14*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 204..207: bridge deck
-   FBGC.push(`rgb(${21*m|0},${27*m|0},${22*m|0})`)}}
+   FBGC.push(`rgb(${21*m|0},${27*m|0},${22*m|0})`)}
+ for(let f=0;f<4;f++){const m=FK[f];                     // 208..211: asphalt
+   FBGC.push(`rgb(${15*m|0},${18*m|0},${17*m|0})`)}
+ for(let f=0;f<4;f++){const m=FK[f];                     // 212..215: lots & courtyards
+   FBGC.push(`rgb(${9*m|0},${11*m|0},${8*m|0})`)}
+ for(let f=0;f<4;f++){const m=FK[f];                     // 216..219: park lawn
+   FBGC.push(`rgb(${9*m|0},${19*m|0},${11*m|0})`)}
+ for(let f=0;f<4;f++){const m=FK[f];                     // 220..223: promenade paving
+   FBGC.push(`rgb(${22*m|0},${26*m|0},${23*m|0})`)}}
 const FBGB=Array.from({length:FBGC.length},()=>[]);
 const hueKind=bid=>8+2*WPICK[(hash2(bid,77)*16)|0];
 
@@ -415,12 +423,14 @@ function groundTex(x,r,fx,fz,fog){
       const b=1-dl/0.5, pv=hash2((fx*7)|0,(fz*7)|0);
       if(pv<b*0.9){put(x,r,pv<b*0.35?'#':pv<b*0.6?':':'.',pv<b*0.25?7:9,fog);return}}
     if(t<3&&ter!==1&&(u<0.25||u>wd-0.25)){                        // sidewalk + furniture
+      if(Math.abs(u-0.25)<0.05||Math.abs(u-(wd-0.25))<0.05){
+        put(x,r,'=',2,fog);return}                                // bright curb line
       const fu=hash2((lg*2)|0,(ax?ix:iz)*3);
       if(fu<0.03){put(x,r,'#',19,fog);return}                     // postal box
       if(fu<0.055){put(x,r,'*',5,fog);return}                     // street lamp
       if(fu<0.08){put(x,r,'o',9+2*((fu*997|0)%8),fog);return}     // vending glow
-      const sg=hash2((fx*6)|0,(fz*6)|0);
-      put(x,r,sg<0.5?':':'.',sg<0.15?28:29,fog);return}
+      const sg=hash2((fx*13)|0,(fz*13)|0);
+      put(x,r,sg<0.55?':':'.',sg<0.15?28:29,fog);return}
     if(t===2&&Math.abs(u-wd/2)<0.05){put(x,r,':',9,fog);return}   // avenue center line
     if(t===3){                                                    // highway
       if(Math.abs(u-wd/2)<0.07){put(x,r,'=',1,fog);return}        // median
@@ -429,7 +439,7 @@ function groundTex(x,r,fx,fz,fog){
     for(const lc of lanes)if(Math.abs(u-lc)<0.04&&(lg*1.6)%1<0.22){
       put(x,r,'.',3,fog);return}                                  // small white dashes
     if(hash2((fx*2)|0,(fz*2)|0)<0.015){put(x,r,'o',1,fog);return} // manhole
-    put(x,r,hash2((fx*4)|0,(fz*4)|0)<0.15?'.':' ',0,fog);return}
+    put(x,r,hash2((fx*11)|0,(fz*11)|0)<0.15?'.':' ',0,fog);return}
   if(ter===3){                                                    // riverside promenade
     const ux3=fx-ix,uz3=fz-iz;
     if((TER[iz*G+ix+1]===1&&ux3>0.82)||(TER[iz*G+ix-1]===1&&ux3<0.18)||
@@ -446,7 +456,7 @@ function groundTex(x,r,fx,fz,fog){
   if(((ux2<0.3&&cellH(ix-1,iz)>2)||(ux2>0.7&&cellH(ix+1,iz)>2)||
       (uz2<0.3&&cellH(ix,iz-1)>2)||(uz2>0.7&&cellH(ix,iz+1)>2))){
     put(x,r,' ',0,fog);return}
-  const hh=hash2((fx*4)|0,(fz*4)|0);
+  const hh=hash2((fx*9)|0,(fz*9)|0);
   put(x,r,hh<0.2?',':hh<0.35?'.':' ',0,fog);
 }
 
@@ -515,7 +525,12 @@ function renderColumn(x,dirX,dirZ,plX,plZ){
       }
       const rFar=Math.max(0,Math.ceil(HOR+lvl*pV/Math.max(0.01,dNext)));
       const rB3=Math.min(bot,H-1);
-      if(TER[ci]===1&&rB3>=rFar)FBGB[(isW?200:204)+fogOf(dCur)].push(x,rFar,rB3);
+      if(rB3>=rFar){                                     // solid ground backdrops
+        const fg3=fogOf(dCur);
+        if(TER[ci]===1)FBGB[(isW?200:204)+fg3].push(x,rFar,rB3);
+        else{const t3=Math.max(RI[mxx],RJ[mzz]);
+          FBGB[(t3?208:TER[ci]===2?216:TER[ci]===3?220:212)+fg3].push(x,rFar,rB3)}
+      }
       for(let r=rB3;r>=rFar;r--){
         const d=lvl*pV/(r-HOR);
         groundTex(x,r,px+rdx*d,pz+rdz*d,fogOf(d));
@@ -635,11 +650,17 @@ function webTry(cxp,cyp){                          // raycast a web line at the 
       web={x:wx,y:wy,z:wz,len:Math.max(2,Math.hypot(wx-px,wy-camH,wz-pz)*0.97)};
       airborne=true;return}
   }
+  const t2=30;                                    // nothing hit: skyhook along the aim
+  const sx2=px+rdx*t2, sz2=pz+rdz*t2, sy2=Math.max(camH+9,camH+slope*t2+6);
+  web={x:sx2,y:sy2,z:sz2,len:Math.max(4,Math.hypot(sx2-px,sy2-camH,sz2-pz)*0.97)};
+  airborne=true;
 }
 cv.addEventListener('pointerdown',e=>{
+  cv.setPointerCapture(e.pointerId);              // hold survives leaving the canvas
   if(e.button===2){webTry(e.clientX,e.clientY);return}
-  drag={x:e.clientX,y:e.clientY,a:ang,p:pitch};cv.setPointerCapture(e.pointerId)});
+  drag={x:e.clientX,y:e.clientY,a:ang,p:pitch}});
 cv.addEventListener('pointerup',e=>{if(e.button===2){web=null;return}drag=null});
+cv.addEventListener('pointercancel',()=>{web=null;drag=null});
 addEventListener('wheel',e=>{e.preventDefault();       // trackpad two-finger look
   ang+=e.deltaX*0.0025;
   pitch=Math.max(-1.5,Math.min(1.9,pitch-e.deltaY*0.0022));
@@ -687,7 +708,7 @@ function move(dt){
         const vr=velX*nx+velH*ny+velZ*nz;
         if(vr>0){velX-=vr*nx;velH-=vr*ny;velZ-=vr*nz}
       }
-      web.len=Math.max(2.5,web.len-2.0*dt);              // slow reel-in
+      web.len=Math.max(6,web.len-1.6*dt);                // reel in, but never to a stall
     }
   }else{                                                 // free flight
     const sp=(7+camH*0.8)*run;
@@ -835,16 +856,17 @@ function frame(now){
   for(const f of FURN){                       // 3d-scaled furniture sprites
     let rx=f.x-px,rz=f.z-pz;
     rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
-    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.8||ty>16)continue;
+    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.8||ty>22)continue;
     const t1=invDet*(dirZ*rx-dirX*rz);
     const sxc=((W/2)*(1+t1/ty))|0;if(sxc<1||sxc>=W-2||ty>GMAX[sxc]+1)continue;
     const rG2=Math.min(H-1,(HOR+camH*pV/ty)|0), fg=fogOf(ty);
     const wCols=Math.max(0,Math.min(2,(0.05*(W/2)/(tanH*ty))|0));  // extra girth up close
     if(f.k===0){                              // lamppost: pole, arm, warm head, halo
       const rTp=Math.max(0,(HOR+(camH-0.28)*pV/ty)|0);
-      for(let r=rTp+1;r<=rG2;r++)put(sxc,r,'|',1,fg);
-      put(sxc,rTp,'o',7,fg);
-      if(wCols>0){put(sxc+1,rTp,'-',1,fg);put(sxc-1,rTp,'.',9,fg);put(sxc+2,rTp,'.',9,fg)}
+      for(let r=rTp+1;r<=rG2;r++)put(sxc,r,'|',3,fg);
+      put(sxc,rTp,'@',7,fg);
+      put(sxc-1,rTp,'.',9,fg);put(sxc+1,rTp,'.',9,fg);
+      if(rTp>0&&wCols>0)put(sxc,rTp-1,'.',9,fg);
     }else if(f.k===1){                        // neon signboard on a post
       const rTp=Math.max(0,(HOR+(camH-0.22)*pV/ty)|0);
       for(let r=rTp+1;r<=rG2;r++)put(sxc,r,'|',1,fg);
