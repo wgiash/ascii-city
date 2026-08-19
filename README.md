@@ -25,7 +25,8 @@ Open `index.html` in a browser. That's it.
 | --- | --- |
 | Drag / two-finger swipe | Look around |
 | WASD | Move |
-| Space / Ctrl | Ascend / descend |
+| G | Toggle walk mode (gravity, on foot) |
+| Space / Ctrl | Jump (walking) · ascend / descend (flying) |
 | Shift | Sprint |
 | Hold right-click | Web-swing toward the cursor |
 | M | Toggle the radar |

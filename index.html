@@ -12,13 +12,13 @@
   #hud b{font-size:15px;letter-spacing:3px;color:#ffd870}
   #hint{position:fixed;left:18px;bottom:14px;color:#4a5468;font:11px/1.6 "Menlo",monospace;
         pointer-events:none;transition:opacity 2s}
-  #pop{position:fixed;right:18px;top:14px;color:#8fe8b8;font:12px/1.5 "Menlo",monospace;
+  #pop{position:fixed;left:18px;top:14px;color:#8fe8b8;font:12px/1.5 "Menlo",monospace;
        letter-spacing:1px;pointer-events:none;text-shadow:0 0 8px rgba(90,230,160,.4)}
 </style>
 </head>
 <body>
 <canvas id="cv"></canvas>
-<div id="hint">drag to look &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; SPACE/CTRL up-down &nbsp;·&nbsp; HOLD RIGHT-CLICK to web-swing &nbsp;·&nbsp; M map</div>
+<div id="hint">drag to look &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; G walk/fly &nbsp;·&nbsp; SPACE jump/ascend &nbsp;·&nbsp; HOLD RIGHT-CLICK to web-swing &nbsp;·&nbsp; M map</div>
 <div id="pop"></div>
 <script>
 'use strict';
@@ -613,6 +613,7 @@ const riverX=z=>G*0.42+Math.sin(z*0.09)*9+z*0.12;
 const keys={};let showMap=true,drag=null;
 addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=1;
   if(e.key.toLowerCase()==='m')showMap=!showMap;
+  if(e.key.toLowerCase()==='g'){walkMode=!walkMode;if(!walkMode)velH=0}
   if(!e.metaKey&&e.key!=='F12')e.preventDefault()});
 addEventListener('keyup',e=>keys[e.key.toLowerCase()]=0);
 addEventListener('mousemove',e=>{                  // drag to look: grab the world
@@ -643,8 +644,15 @@ addEventListener('wheel',e=>{e.preventDefault();       // trackpad two-finger lo
   ang+=e.deltaX*0.0025;
   pitch=Math.max(-1.5,Math.min(1.9,pitch-e.deltaY*0.0022));
 },{passive:false});
-let velX=0,velZ=0,velH=0;
-const GRAV=2.6;
+let velX=0,velZ=0,velH=0,walkMode=false;
+const GRAV=2.6, EYE=0.12;
+const topAt=(x,z)=>{const i=((Math.floor(x)%G)+G)%G,j=((Math.floor(z)%G)+G)%G;
+  return HGT[j*G+i]*STY};
+function hitsWall(nx,nz,feet){const m=0.18;              // solid buildings
+  return topAt(nx-m,nz-m)>feet+0.06||topAt(nx+m,nz-m)>feet+0.06||
+         topAt(nx-m,nz+m)>feet+0.06||topAt(nx+m,nz+m)>feet+0.06}
+function groundAt(x,z){const m=0.18;                     // surface underfoot
+  return Math.max(topAt(x-m,z-m),topAt(x+m,z-m),topAt(x-m,z+m),topAt(x+m,z+m))}
 function move(dt){
   const run=keys['shift']?3:1;
   if(keys['arrowleft'])ang-=1.8*dt; if(keys['arrowright'])ang+=1.8*dt;
@@ -655,11 +663,19 @@ function move(dt){
   if(keys['a']){fx+=s;fz-=c} if(keys['d']){fx-=s;fz+=c}
   if(keys['r']||keys[' '])fh+=1; if(keys['f']||keys['control'])fh-=1;
   const l=Math.hypot(fx,fz)||1;
-  if(web||airborne){                                     // swing / ballistic physics
+  const ground=groundAt(px,pz);
+  if(web||airborne||walkMode){                           // gravity world
+    const grounded=!web&&camH<=ground+EYE+0.02;
     velH-=GRAV*dt;
-    velX+=(fx/l)*4*dt; velZ+=(fz/l)*4*dt;                // gentle air control
-    velH+=fh*3*dt;
-    px+=velX*dt; pz+=velZ*dt; camH+=velH*dt;
+    if(walkMode&&grounded){
+      const spw=0.9*(keys['shift']?2.2:1);               // on foot
+      const k=1-Math.exp(-dt*10);
+      velX+=((fx/l)*spw-velX)*k; velZ+=((fz/l)*spw-velZ)*k;
+      if(keys[' '])velH=1.5;                             // jump
+    }else{
+      velX+=(fx/l)*4*dt; velZ+=(fz/l)*4*dt;              // air control
+      if(!walkMode)velH+=fh*3*dt;
+    }
     if(web){                                             // rope constraint (pendulum)
       let dx=px-web.x,dz=pz-web.z;
       dx-=G*Math.round(dx/G);dz-=G*Math.round(dz/G);
@@ -673,17 +689,22 @@ function move(dt){
       }
       web.len=Math.max(2.5,web.len-2.0*dt);              // slow reel-in
     }
-    const minH=cellH(px|0,pz|0)*STY+1.2;
-    if(camH<=minH&&velH<=0){camH=minH;velH=0;airborne=false;web=null}  // landed
-    if(camH>18){camH=18;velH=Math.min(velH,0)}
-  }else{
+  }else{                                                 // free flight
     const sp=(7+camH*0.8)*run;
-    const k=1-Math.exp(-dt*7);                           // inertia: ease in and out
+    const k=1-Math.exp(-dt*7);
     velX+=((fx/l)*sp-velX)*k; velZ+=((fz/l)*sp-velZ)*k;
     velH+=(fh*(4+camH*0.35)*run-velH)*k;
-    px+=velX*dt; pz+=velZ*dt; camH+=velH*dt;
-    camH=Math.max(cellH(px|0,pz|0)*STY+1.2,Math.min(18,camH));
   }
+  const feet=camH-EYE;                                   // solid world: slide along walls
+  const nx2=px+velX*dt; if(hitsWall(nx2,pz,feet)){velX=(web||airborne)?velX*-0.15:0}else px=nx2;
+  const nz3=pz+velZ*dt; if(hitsWall(px,nz3,feet)){velZ=(web||airborne)?velZ*-0.15:0}else pz=nz3;
+  camH+=velH*dt;
+  const g2=groundAt(px,pz);
+  if(camH<g2+EYE){camH=g2+EYE;                           // land on whatever is below
+    if(velH<0)velH=0;
+    if(airborne&&!web){airborne=false;web=null}}
+  if(web||walkMode)airborne=camH>groundAt(px,pz)+EYE+0.02||!!web;
+  if(camH>18){camH=18;velH=Math.min(velH,0)}
   px=((px%G)+G)%G;pz=((pz%G)+G)%G;                       // endless city: wrap around
 }
 
