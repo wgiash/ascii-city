@@ -3,10 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ネオン坂 — NEON-ZAKA</title>
+<title>A playable ASCII city</title>
 <style>
-  html,body{margin:0;height:100%;background:#000;overflow:hidden}
-  canvas{display:block;width:100vw;height:100vh;cursor:grab}
+  
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;
+       overscroll-behavior:none;touch-action:none}
+  canvas{display:block;width:100vw;height:100vh;cursor:grab;touch-action:none}
   #hud{position:fixed;left:18px;top:14px;color:#8f9ab0;font:12px/1.5 "Menlo","Osaka-Mono",monospace;
        pointer-events:none;text-shadow:0 0 8px rgba(120,180,255,.4)}
   #hud b{font-size:15px;letter-spacing:3px;color:#ffd870}
@@ -14,15 +16,50 @@
         pointer-events:none;transition:opacity 2s}
   #pop{position:fixed;left:18px;top:14px;color:#8fe8b8;font:12px/1.5 "Menlo",monospace;
        letter-spacing:1px;pointer-events:none;text-shadow:0 0 8px rgba(90,230,160,.4)}
+  #toast{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);color:#bfe8d0;
+       font:13px/1.4 "Menlo",monospace;letter-spacing:1px;pointer-events:none;
+       text-shadow:0 0 10px rgba(120,230,170,.5);opacity:0;transition:opacity .5s}
 </style>
 </head>
 <body>
 <canvas id="cv"></canvas>
-<div id="hint">drag to look &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; G walk/fly &nbsp;·&nbsp; SPACE jump/ascend &nbsp;·&nbsp; HOLD RIGHT-CLICK to web-swing &nbsp;·&nbsp; M map</div>
-<div id="pop"></div>
+  <div class="unit"><button class="gk pill" data-k="shift">⇧</button><div class="lbl">Boost</div></div>
+ </div>
+ <div class="cl right">
+  <div class="unit"><button class="gk circ" data-k="f">F</button><div class="lbl">Laser</div></div>
+  <div class="unit">
+   <div class="arrows">
+    <button class="gk circ sm" data-k="arrowleft">←</button>
+    <button class="gk circ sm" data-k="arrowright">→</button>
+   </div>
+   <div class="lbl">Aim</div>
+  </div>
+ </div>
+</div>
+ <div class="ab"><b class="k" data-k="arrowleft">←</b><b class="k" data-k="arrowright">→</b></div>
+ <div class="spk"></div>
+ <div class="mini">
+  <span class="mcell"><span class="mlab">BOOST</span><b class="k" data-k="shift">⇧</b></span>
+  <span class="mcell"><span class="mlab">LASER</span><b class="k" data-k="f">F</b></span>
+ </div>
+</div>
+  <div class="krow"><b data-k="a">[A]</b><b data-k="s">[S]</b><b data-k="d">[D]</b></div>
+ </div>
+ <div class="pad">
+  <div class="krow"><b data-k="arrowleft">[&lt;]</b><b data-k="arrowright">[&gt;]</b></div>
+  <div class="krow"><b data-k="f">[F]</b><span class="klabel">LASER</span></div>
+ </div>
+</div>
 <script>
 'use strict';
+const RMOTION=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const FLASH_MS=RMOTION?1e9:420;                   // photosensitivity: no >3Hz flashing
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const gcv=document.createElement('canvas'),gctx=gcv.getContext('2d');  // quarter-res bloom layer
+let GLOWQ=[];                                            // cells that bloom this frame (x,r,co)
+// the bloom's per-frame canvas blur is brutal on mobile Safari — enough to
+// take the whole page down. Touch devices run matte.
+const BLOOM_OK=!matchMedia('(pointer: coarse)').matches;
 
 /* ---------- rng / hash ---------- */
 function mulberry(s){return function(){s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);
@@ -41,67 +78,93 @@ function vn(x,y){                      // smooth value noise, for the clouds
 /* ---------- palette: flat kinds x 4 fog levels ---------- */
 /* 0 FACE 1 ROOF 2 EDGE 3 DIM 4 WHITE 5 WHITE2 6 BEACON 7 CAR, then hue pairs (bright,dim) */
 const KRGB=[
- [12,18,14],[34,46,38],[150,190,165],[95,130,110],
- [240,252,242],[255,255,252],[255,60,50],[255,220,150],
- [120,255,190],[60,130,100],  // mako green
- [255,236,180],[150,135,95],  // warm cream
- [255,200,110],[150,115,60],  // gold
- [200,245,220],[115,145,128], // pale green-white
- [90,220,180],[50,120,100],   // teal
- [235,250,240],[140,152,146], // cool white
- [255,170,80],[150,98,45],    // amber
- [255,120,60],[150,70,35],    // orange
- [24,44,36],[10,22,17],       // water
- [70,130,85],[28,56,36],      // park green
- [120,130,122],[70,78,72],    // sidewalk gray-green
- [14,20,28],[24,34,44],       // (unused glyph body tones)
- [38,50,60],[54,68,78],
- [22,29,36],[46,58,66]];      // cloud body, moonlit cloud edge (faint)
-const FOGM=[1,0.8,0.58,0.34];         // mix weight toward the dusk haze (bright kinds)
-const HAZE=[46,82,62];
+ [7,9,20],[18,24,48],[150,170,230],[90,110,175],
+ [240,246,255],[255,255,252],[255,60,50],[255,225,150],
+ [70,165,255],[38,90,160],   // neon blue — the city's one light color
+ [255,240,190],[150,138,100], // horizon cream
+ [255,225,120],[150,128,66],  // sun-line gold
+ [255,120,200],[150,60,110],  // hot pink
+ [80,255,95],[40,150,55],    // gamma green
+ [235,242,255],[140,150,175], // cool white
+ [255,190,90],[150,110,50],   // warm amber
+ [255,120,60],[150,70,35],   // orange
+ [10,30,88],[4,15,52],       // deep water
+ [55,130,65],[22,54,28],     // park green
+ [110,120,150],[64,72,95],    // sidewalk blue-gray
+ [7,9,16],[12,15,26],         // wall glyph body tones (slabs, mullions)
+ [18,22,36],[25,30,48],
+ [20,26,44],[44,54,86],       // cloud body, moonlit cloud edge (faint)
+ [185,105,255],[95,55,160]];   // neon violet — the nose laser
+const FOGM=[0.86,0.56,0.36,0.2];      // mix weight toward the dusk haze (bright kinds)
+const HAZE=[40,50,110];
 const FPAL=KRGB.map(c=>{
   const lum=(c[0]+c[1]+c[2])/3;       // darks fade to BLACK, keeping contrast deep
   return FOGM.map((g,fi)=>{
-    if(lum<70){const k=[1,0.75,0.5,0.3][fi];
+    if(lum<70){const k=[0.88,0.62,0.4,0.24][fi];
       return`rgb(${c[0]*k|0},${c[1]*k|0},${c[2]*k|0})`}
+    if(fi===0)return`rgb(${c[0]*0.9|0},${c[1]*0.9|0},${c[2]*0.9|0})`   // near: darken, never wash
     return`rgb(${c[0]*g+HAZE[0]*(1-g)|0},${c[1]*g+HAZE[1]*(1-g)|0},${c[2]*g+HAZE[2]*(1-g)|0})`})});
 const WPICK=[1,1,2,1,0,5,1,2,4,1,3,2,0,6,5,7]; // warm sprawl, mako-green accents
 /* facade background shades: 4 body tones x 2 sides x 3 skylight bands x 4 fog,
    plus 4 roof shades at the end — solid fills painted behind the glyphs */
-const GLOW=[90,150,120];
+const GLOW=[90,110,190];
 /* 8 body hues: green-tinted industrial darks */
-const BODYT=[[5,8,7],[7,11,9],[10,15,11],[11,10,7],[8,12,10],[12,13,9],[15,20,16],[8,8,7]];
+const BODYT=[[2,3,6],[4,5,10],[7,9,16],[9,8,14],[5,7,13],[10,11,18],[15,17,28],[3,3,7]];
 const FBGC=[];
 {const mixc=(a,b,t)=>[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t];
- const FK=[1,0.82,0.64,0.48];
+ const FK=[0.86,0.64,0.44,0.3];
  for(let t=0;t<8;t++)for(let s=0;s<2;s++)for(let b=0;b<3;b++)for(let f=0;f<4;f++){
-   let c=mixc(BODYT[t],GLOW,b===0?0.16:b===1?0.06:0.02);
+   let c=mixc(BODYT[t],GLOW,b===0?0.09:b===1?0.035:0.01);
    const m=(s?0.75:1)*FK[f];
    FBGC.push(`rgb(${c[0]*m|0},${c[1]*m|0},${c[2]*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 192..195: roofs
-   FBGC.push(`rgb(${19*m|0},${27*m|0},${21*m|0})`)}
+   FBGC.push(`rgb(${10*m|0},${12*m|0},${24*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 196..199: tree foliage
-   FBGC.push(`rgb(${24*m|0},${44*m|0},${30*m|0})`)}
+   FBGC.push(`rgb(${14*m|0},${34*m|0},${18*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 200..203: river water (recessed, dark)
-   FBGC.push(`rgb(${8*m|0},${18*m|0},${14*m|0})`)}
+   FBGC.push(`rgb(${5*m|0},${14*m|0},${48*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 204..207: bridge deck
-   FBGC.push(`rgb(${21*m|0},${27*m|0},${22*m|0})`)}
+   FBGC.push(`rgb(${17*m|0},${20*m|0},${34*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 208..211: asphalt
-   FBGC.push(`rgb(${15*m|0},${18*m|0},${17*m|0})`)}
+   FBGC.push(`rgb(${13*m|0},${15*m|0},${26*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 212..215: lots & courtyards
-   FBGC.push(`rgb(${9*m|0},${11*m|0},${8*m|0})`)}
+   FBGC.push(`rgb(${8*m|0},${9*m|0},${18*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 216..219: park lawn
-   FBGC.push(`rgb(${9*m|0},${19*m|0},${11*m|0})`)}
+   FBGC.push(`rgb(${9*m|0},${24*m|0},${12*m|0})`)}
  for(let f=0;f<4;f++){const m=FK[f];                     // 220..223: promenade paving
-   FBGC.push(`rgb(${22*m|0},${26*m|0},${23*m|0})`)}}
+   FBGC.push(`rgb(${18*m|0},${21*m|0},${36*m|0})`)}}
 const FBGB=Array.from({length:FBGC.length},()=>[]);
 const hueKind=bid=>8+2*WPICK[(hash2(bid,77)*16)|0];
+/* the city sits back a step; the ship, monsters and fire stay at full voltage */
+const dimC=c=>{const m=c.match(/\d+/g).map(Number);
+  const mx=Math.max(m[0],m[1],m[2]),mn=Math.min(m[0],m[1],m[2]);
+  if(mx>140&&mx-mn>50)                                  // neon only: bright AND saturated
+    return`rgb(${m[0]},${m[1]},${m[2]})`;   // undimmed: the lights burn full
+  return`rgb(${m[0]},${m[1]},${m[2]})`};
+const FPALD=FPAL.map(r=>r.map(dimC));
+for(let i=0;i<FBGC.length;i++)FBGC[i]=dimC(FBGC[i]);
+/* buildings go ink-black: bodies recede, the lights float */
+const inkC=c=>{const m=c.match(/\d+/g);
+  return`rgb(${m[0]*0.45|0},${m[1]*0.45|0},${m[2]*0.45|0})`};
+for(let i=0;i<196;i++)FBGC[i]=inkC(FBGC[i]);            // facade + roof backdrops
+for(const P of [FPAL,FPALD])
+  for(let k=30;k<=33;k++)for(let f=0;f<4;f++)P[k][f]=inkC(P[k][f]);  // wall glyph tones
+/* every light in the CITY burns the same neon blue; the ship, monsters,
+   lasers and fire draw from FPAL and keep their own colors */
+for(let k=10;k<=23;k+=2){FPALD[k]=FPALD[8].slice();FPALD[k+1]=FPALD[9].slice()}
+/* the ship outshines everything around it */
+const glowUp=c=>{const m=c.match(/\d+/g).map(Number);
+  const av=(m[0]+m[1]+m[2])/3;                            // saturate, then brighten
+  const f2=v=>Math.max(0,Math.min(255,(av+(v-av)*1.45)*1.35))|0;
+  return`rgb(${f2(m[0])},${f2(m[1])},${f2(m[2])})`};
+for(const k of [22,23])for(let f=0;f<4;f++)FPAL[k][f]=glowUp(FPAL[k][f]);
 
 /* ---------- city: roads (1 street/one-way, 2 avenue, 3 highway), river, parks ---------- */
 const G=120, HGT=new Uint8Array(G*G), BID=new Int32Array(G*G), TER=new Uint8Array(G*G),
       RI=new Uint8Array(G),RJ=new Uint8Array(G),RIO=new Uint8Array(G),RJO=new Uint8Array(G),
       RIW=new Uint8Array(G),RJW=new Uint8Array(G);
 const TREES=[],BRI=new Uint8Array(G),BRJ=new Uint8Array(G),PIER=new Uint8Array(G*G),
+      TRAP=new Uint8Array(G*G),
       BRIDGES=[],FURN=[],PEDS=[];
 let POPBASE=0;
 (function gen(){
@@ -132,13 +195,36 @@ let POPBASE=0;
         else if(run){if(run.e>=run.s)BRIDGES.push({ax,c,s:run.s-0.2,e:run.e+1.2,w:W2[i]});run=null}}
     }}
   scanBridges(RI,BRI,RIO,RIW,0);scanBridges(RJ,BRJ,RJO,RJW,1);
-  for(let j=2;j<G-2;j++)for(let i=2;i<G-2;i++){           // street furniture
+  for(let j=2;j<G-2;j++)for(let i=2;i<G-2;i++){           // street furniture, on the sidewalks
     const t=Math.max(RI[i],RJ[j]);if(!t||t>2||TER[j*G+i])continue;
+    const ax=RI[i]>=RJ[j];
+    if(ax?RIO[i]:RJO[j])continue;                          // one strip per road, not per lane
+    const base=ax?i-RIO[i]:j-RJO[j], wd=ax?RIW[i]:RJW[j];
     const h7=hash2(i*3,j*7);
-    if(h7<0.3)FURN.push({x:i+0.15,z:j+0.2+hash2(j,i)*0.6,k:0});        // lamppost
-    if(h7>0.9)FURN.push({x:i+0.8,z:j+0.7,k:1,hu:8+2*WPICK[(hash2(i*5,j*9)*16)|0]}); // sign
-    else if(h7>0.84)FURN.push({x:i+0.82,z:j+0.3,k:2});                 // garbage can
-    else if(h7>0.78)FURN.push({x:i+0.18,z:j+0.6,k:3});                 // bench
+    const edge=base+(hash2(i*7,j*3)<0.5?0.13:wd-0.13);     // a sidewalk side
+    const along=(ax?j:i)+0.15+hash2(j,i)*0.7;
+    const X=ax?edge:along, Z=ax?along:edge;
+    if(h7<0.3)FURN.push({x:X,z:Z,k:0});                    // lamppost
+    if(h7>0.9)FURN.push({x:X,z:Z,k:1,hu:8+2*WPICK[(hash2(i*5,j*9)*16)|0]}); // sign
+    else if(h7>0.84)FURN.push({x:X,z:Z,k:2});              // garbage can
+    else if(h7>0.78)FURN.push({x:X,z:Z,k:3});              // bench
+  }
+  for(let j=2;j<G-2;j++)for(let i=2;i<G-2;i++){           // stoplights: paired poles per crossing
+    if(!RI[i]||!RJ[j]||RI[i]>2||RJ[j]>2||RIO[i]||RJO[j]||TER[j*G+i])continue;
+    const wi=RIW[i],wj=RJW[j];
+    FURN.push({x:i+0.1,z:j+0.1,k:4,ii:i,jj:j});
+    FURN.push({x:i+wi-0.1,z:j+wj-0.1,k:4,ii:i,jj:j});
+  }
+  for(let j=2;j<G-2;j++)for(let i=2;i<G-2;i++){           // shop signs jutting over the sidewalk
+    const t=Math.max(RI[i],RJ[j]);if(!t||t>2||TER[j*G+i])continue;
+    const cand=[];
+    if(BID[j*G+i-1]>0)cand.push([i+0.08,j+0.3+hash2(i,j*3)*0.4]);
+    if(BID[j*G+i+1]>0)cand.push([i+0.92,j+0.3+hash2(i*5,j)*0.4]);
+    if(BID[(j-1)*G+i]>0)cand.push([i+0.3+hash2(i*7,j)*0.4,j+0.08]);
+    if(BID[(j+1)*G+i]>0)cand.push([i+0.3+hash2(i,j*9)*0.4,j+0.92]);
+    for(const[sx,sz]of cand)if(hash2((sx*31)|0,(sz*37)|0)<0.42)
+      FURN.push({x:sx,z:sz,k:5,hu:8+2*WPICK[(hash2((sx*23)|0,(sz*29)|0)*16)|0],
+                 hgt:0.5+hash2((sx*41)|0,(sz*43)|0)*0.45,ln:2+(hash2((sx*3)|0,(sz*7)|0)*3|0)});
   }
   for(let j=1;j<G-1;j++)for(let i=1;i<G-1;i++){           // piers off the promenades
     if(TER[j*G+i]!==1)continue;
@@ -213,13 +299,36 @@ let POPBASE=0;
     const nearRoad=RI[i-1]||RI[i+1]||RJ[j-1]||RJ[j+1];
     const p=TER[c]===3?0.4:nearRoad?0.5:0.18;
     if(rnd()<p)TREES.push({x:i+0.2+rnd()*0.6,z:j+0.2+rnd()*0.6,h:0.35+rnd()*0.3});}
-  let tries=0;                                            // the population, on sidewalks
-  while(PEDS.length<420&&tries++<20000){
-    const wx=rnd()*G,wz=rnd()*G;
-    if(walkable(wx,wz))PEDS.push({x:wx,z:wz,a:rnd()*6.28,sp:0.05+rnd()*0.08})}
+  {                                                       // walled pockets: no on-foot path to a road
+    const topC=new Float32Array(G*G);
+    for(let c=0;c<G*G;c++)topC[c]=TER[c]===1?-9:HGT[c]*0.18;   // 0.18 = STY, declared later
+    const Q=[];TRAP.fill(1);
+    for(let j=0;j<G;j++)for(let i=0;i<G;i++){const c=j*G+i;
+      if((RI[i]||RJ[j])&&!HGT[c]&&TER[c]!==1){TRAP[c]=0;Q.push(c)}}
+    for(let q=0;q<Q.length;q++){const c=Q[q],i=c%G,j=(c/G)|0;
+      const nb=[((i+1)%G)+j*G,((i+G-1)%G)+j*G,i+((j+1)%G)*G,i+((j+G-1)%G)*G];
+      for(const n of nb)                                    // step down freely, up only a hop
+        if(TRAP[n]&&topC[n]>-8&&topC[c]<=topC[n]+0.30){TRAP[n]=0;Q.push(n)}}
+    for(let c=0;c<G*G;c++)if(TER[c]===1)TRAP[c]=0;          // water rescues itself
+  }
   for(let k=0;k<G*G;k++)POPBASE+=HGT[k];
   POPBASE=POPBASE*37+PEDS.length;
 })();
+/* Collision mass, per building instead of per cell. The setback pass cuts 45%
+   of a tall building's cells to 55% height for the stepped massing, and since
+   HGT caps at 60 those cut cells top out at 33 storeys -- under the 38.6 a
+   cell has to reach to be solid at cruise altitude. That punched a hole
+   through roughly half of every tower's footprint, which is how you fly in
+   through a setback and end up in the middle of a building. Every cell of an
+   ordinary building now reports its building's full height TO COLLISION only,
+   so the steps still read as steps but the mass is solid. Only positive BIDs
+   get this: the reactor's rings share BID -3 at deliberately different
+   heights, and maxing those would stand its low apron up into a wall. */
+const CHGT=new Uint8Array(G*G);
+{const bmax=new Map();
+ for(let c=0;c<G*G;c++){const b=BID[c];
+   if(b>0&&HGT[c]>(bmax.get(b)||0))bmax.set(b,HGT[c])}
+ for(let c=0;c<G*G;c++){const b=BID[c];CHGT[c]=b>0?bmax.get(b):HGT[c]}}
 const cellH=(x,z)=>(x<0||z<0||x>=G||z>=G)?0:HGT[z*G+x];
 function walkable(nx,nz){          // sidewalks, crosswalks, parks, promenades
   const ii=nx|0,jj=nz|0;
@@ -237,9 +346,12 @@ function walkable(nx,nz){          // sidewalks, crosswalks, parks, promenades
 
 /* ---------- camera / screen ---------- */
 const FOV=68*Math.PI/180, tanH=Math.tan(FOV/2), MAXD=110, STY=0.18;
-let px=0,pz=0,ang=0,camH=5.0,pitch=0;
+let px=0,pz=0,ang=0,camH=5.0,pitch=-0.14;              // fixed view, angled down at the city
+let angV=0,pitchV=-0.14;                                 // eased view, trails the inputs
 px=48.2;pz=70.5;ang=-1.0;   // over the river, looking upstream at downtown
-let W=0,H=0,CW=6,LH=11,HOR=0,pV=0,CH,CO,GMAX,SKYB,skyGrad;
+let W=0,H=0,CW=6,LH=11,HOR=0,pV=0,CH,CO,DEP,BRT,GMAX,SKYB,skyGrad;
+let PD=0;                                               // depth of whatever put() writes next
+let PB=0;                                               // 1 = hero-bright (ship, monsters, fire)
 let FONT='7px "Menlo","Osaka-Mono",monospace';
 function resize(){
   const dpr=Math.min(2,window.devicePixelRatio||1);     // render at native resolution
@@ -253,17 +365,34 @@ function resize(){
   W=Math.ceil(cv.width/CW);H=Math.ceil(cv.height/LH);HOR=(H*0.30)|0;
   const tanV=tanH*(H*LH)/(W*CW);pV=(H/2)/tanV;
   CH=new Array(W*H).fill(' ');CO=new Uint8Array(W*H);GMAX=new Float32Array(W);
+  DEP=new Float32Array(W*H);BRT=new Uint8Array(W*H);
   SKYB=new Int16Array(W);
+  gcv.width=Math.max(1,cv.width>>2);gcv.height=Math.max(1,cv.height>>2);
   buildSky();
 }
 function buildSky(){                                     // near-black night, faint teal horizon
   skyGrad=ctx.createLinearGradient(0,0,0,Math.max(40,(HOR+7)*LH));
-  skyGrad.addColorStop(0,'#050a12');skyGrad.addColorStop(0.45,'#0a1a20');
-  skyGrad.addColorStop(0.75,'#123a38');skyGrad.addColorStop(1,'#22584a');
+  skyGrad.addColorStop(0,'#030309');skyGrad.addColorStop(0.42,'#171043');
+  skyGrad.addColorStop(0.72,'#3a2d8f');skyGrad.addColorStop(0.93,'#8d7fd6');
+  skyGrad.addColorStop(1,'#e8d9a0');
 }
-addEventListener('resize',resize);resize();
-function put(x,r,ch,kind,fog){if(r<0||r>=H)return;const i=r*W+x;CH[i]=ch;CO[i]=kind*4+fog}
-const fogOf=d=>d<MAXD*0.35?0:d<MAXD*0.6?1:d<MAXD*0.85?2:3;
+let lastFit=0;
+function fitCanvas(t){                  // windows (and phone URL bars) resize without telling us
+  const dpr=Math.min(2,window.devicePixelRatio||1);
+  if(Math.abs(cv.width-Math.max(320,Math.round(innerWidth*dpr)))<=2&&
+     Math.abs(cv.height-Math.max(240,Math.round(innerHeight*dpr)))<=2)return;
+  // iOS slides its URL bar over ~10 frames and reports a new height on each
+  // one. Reallocating a full-res backing store plus five typed arrays that
+  // often is what makes the tab get killed, so coalesce: the check runs every
+  // frame anyway, so the size still lands once the slide stops.
+  if(t-lastFit<250)return;
+  lastFit=t;resize();
+}
+addEventListener('resize',()=>fitCanvas(performance.now()));resize();
+function put(x,r,ch,kind,fog){if(x<0||x>=W||r<0||r>=H)return;const i=r*W+x;
+  if(PD>DEP[i]+0.35)return;                             // something nearer owns this cell
+  DEP[i]=Math.min(DEP[i],PD);CH[i]=ch;CO[i]=kind*4+fog;BRT[i]=PB}
+const fogOf=d=>d<MAXD*0.22?0:d<MAXD*0.45?1:d<MAXD*0.7?2:3;
 let NOW=0,TB=0;
 /* ---------- wall texture: hue identity, storefronts, blazing floors ---------- */
 function wallTex(x,r,bid,side,wc,ys,h,fog,mxx,mzz){
@@ -291,64 +420,142 @@ function wallTex(x,r,bid,side,wc,ys,h,fog,mxx,mzz){
     put(x,r,(story&1)?'=':'-',(story&1)?1:3,fog);return}  // heavy hull slats
   const hk=hueKind(bid);
   const cellu=Math.floor(wc), mloc=m-cellu*8;
+  /* fight the boil: far facades sample COARSE buckets so a step of camera
+     motion stops re-rolling every cell's glyph */
+  const mq=fog>=2?(m>>2)<<2:fog===1?(m>>1)<<1:m, sq=fog>=2?story&~1:story;
   const bodyK=30+(((hash2(bid,3)*8)|0)>>1), bK=side?Math.max(30,bodyK-1):bodyK;
   if(ys>h-0.5){                                                  // roofline + red beacons
-    if(h>=12&&(mloc===0||mloc===7)&&hash3(bid,cellu,7)<0.5){put(x,r,'*',6,fog);return}
+    if(h>=20&&mloc===0&&hash3(bid,cellu,7)<0.15){put(x,r,'*',6,fog);return}
     put(x,r,'=',hash2(bid,31)<0.5?hk:2,fog);return}
   /* luminous crown: top stories of some tall towers fully lit */
   const cr=h>=16?(hash2(bid,101)*12)|0:0;
   if((cr===2||cr===3)&&story>=h-3){
-    const b=hash3(bid,m,story);
+    const b=hash3(bid,mq,sq);
     put(x,r,b<0.6?'#':'=',b<0.12?5:hk,fog);return}
-  /* dark seam where two different buildings meet: separates silhouettes */
+  /* vertex outlines: a bright edge where the corner meets open air, a dark seam between buildings */
   if(mloc===0||mloc===7){
     const nu=(((mloc===7?cellu+1:cellu-1)%G)+G)%G;
-    const nb=side===0?BID[nu*G+mxx]:BID[mzz*G+nu];
-    if(nb!==bid){put(x,r,(r&1)?':':'.',0,fog);return}}
+    const ni=side===0?nu*G+mxx:mzz*G+nu;
+    if(HGT[ni]*STY<ys-0.001){put(x,r,':',3,fog);return}   // whisper of a vertex line
+    if(BID[ni]!==bid){put(x,r,(r&1)?':':'.',0,fog);return}}
   /* giant animated ad screens */
-  if(h>=14&&hash2(bid,49)<0.2){const s0=(h*0.35)|0;
+  if(h>=14&&fog<2&&hash2(bid,49)<0.2){const s0=(h*0.35)|0;
     if(story>=s0&&story<=s0+4){
       const sk=8+2*WPICK[(hash2(bid,53)*16)|0];
-      const flash=((NOW/2600+hash2(bid,9))%1)<0.05;      // occasional full flash
+      const flash=!RMOTION&&((NOW/2600+hash2(bid,9))%1)<0.05;  // occasional full flash
       const px2=hash3(bid,m-((NOW/130)|0)*2,story*3);    // content scrolls sideways
       put(x,r,flash?'#':px2<0.55?'#':px2<0.85?'o':':',flash?sk:px2<0.7?sk:sk+1,fog);return}}
   /* animated rooftop billboards */
-  if(h>=6&&h<=26&&hash2(bid,45)<0.3&&story>=h-3&&story<=h-2){
+  if(h>=6&&h<=26&&fog<2&&hash2(bid,45)<0.3&&story>=h-3&&story<=h-2){
     const bk=8+2*WPICK[(hash2(bid,47)*16)|0];
     const sc3=(((m+((NOW/140)|0))%6)+6)%6;               // scrolling light bands
     put(x,r,sc3<3?'#':'=',sc3<3?bk:bk+1,fog);return}
+  /* ---- ground floor: every building gets its own storefront, door and fascia ---- */
+  const arch=(hash2(bid,155)*10)|0;                               // per-building archetype
+  const dpos=2+((hash3(bid,cellu,157)*4)|0);                      // door slot on this cell-face
+  const shopHue=8+2*WPICK[(hash3(bid,cellu,4)*16)|0];
   if(story===0){
-    const com=hash2(bid,55);
-    if(com<0.34){                                                 // commercial: storefront strip
-      const seg=m>>3, sk=8+2*WPICK[(hash3(bid,seg,4)*16)|0];
-      const sh=hash3(bid,m,1);
-      put(x,r,sh<0.4?'#':sh<0.55?'=':sh<0.8?':':'.',sh<0.4?sk:sh<0.55?4:sh<0.8?sk+1:3,fog);return}
-    const dm=hash3(bid,m>>1,6);                                   // quiet lobby: door + a few lights
-    put(x,r,dm<0.05?'#':dm<0.09?'o':dm<0.5?'.':' ',dm<0.05?4:dm<0.09?7:bK,fog);return}
-  /* hanging vertical neon sign, stories 1-4 */
-  if(story>=1&&story<=4&&hash3(bid,cellu,29)<0.28){
+    const inDoor=mloc===dpos||mloc===dpos+1;
+    if(fy>0.86){put(x,r,'=',inDoor?3:2,fog);return}               // plinth / door sill
+    if(inDoor&&arch!==5&&arch!==6){                               // a real doorway
+      if(arch===4){const dg=hash3(bid,m,161);                     // lobby double door
+        const hdl=fy>0.3&&fy<0.5&&mloc===dpos+1;
+        put(x,r,hdl?'o':dg<0.5?':':'.',hdl?7:0,fog);return}
+      const spill=hash3(m,r,163);                                 // light spilling out
+      put(x,r,spill<0.55?'#':spill<0.8?'=':':',spill<0.4?shopHue:4,fog);return}
+    switch(arch){
+      case 0:{                                                    // neon storefront glass
+        if(fy<0.16){put(x,r,'=',shopHue+1,fog);return}
+        const g0=hash3(bid,m,167);
+        put(x,r,g0<0.5?'#':g0<0.7?'=':':',g0<0.45?shopHue:g0<0.7?4:shopHue+1,fog);return}
+      case 1:{                                                    // izakaya lattice + lanterns
+        if((mloc===dpos-1||mloc===dpos+2)&&fy<0.4){put(x,r,'o',20,fog);return}
+        put(x,r,(mloc&1)?'=':'|',(mloc&1)?12:13,fog);return}
+      case 2:{                                                    // pachinko hall, flashing
+        const ph=(m+((NOW/FLASH_MS)|0))&1;
+        const zz=hash3(bid,m,171);
+        put(x,r,ph?'#':'o',zz<0.08?5:ph?shopHue:shopHue+1,fog);return}
+      case 3:{                                                    // konbini: cool glass + shelves
+        if(fy<0.18){put(x,r,'=',8,fog);return}
+        if(Math.abs(fy-0.45)<0.06||Math.abs(fy-0.7)<0.06){put(x,r,'-',3,fog);return}
+        const k3=hash3(bid,m,173);
+        put(x,r,k3<0.55?'#':':',k3<0.2?18:19,fog);return}
+      case 4:{                                                    // dark lobby, wall sconces
+        if((mloc===1||mloc===6)&&fy<0.3){put(x,r,'o',7,fog);return}
+        const l4=hash3(bid,m,177);
+        put(x,r,l4<0.3?':':'.',l4<0.1?3:0,fog);return}
+      case 5:{                                                    // service garage shutters
+        if(hash3(bid,cellu,179)<0.3&&fy>0.55){put(x,r,hash3(m,r,3)<0.15?'.':' ',0,fog);return}
+        put(x,r,((fy*8)|0)&1?'=':'-',((fy*8)|0)&1?1:3,fog);return}
+      case 6:{                                                    // shuttered + graffiti
+        const gf=hash3(m,(fy*3)|0,181);
+        if(gf<0.22){put(x,r,gf<0.08?'x':gf<0.15?'%':'o',gf<0.11?22:10,fog);return}
+        if(fy>0.8&&hash3(m,7,bid)<0.3){put(x,r,',',3,fog);return}
+        put(x,r,'-',1,fog);return}
+      case 7:{                                                    // market bins under an awning
+        if(fy<0.2){put(x,r,'=',(mloc&1)?shopHue:4,fog);return}
+        if(fy>0.5){put(x,r,'o',[8,20,12][mloc%3],fog);return}
+        put(x,r,':',1,fog);return}
+      case 8:{                                                    // bathhouse: teal + portholes
+        if(fy<0.2){put(x,r,'=',16,fog);return}
+        if((mloc===1||mloc===6)&&fy>0.3&&fy<0.55){put(x,r,'o',4,fog);return}
+        put(x,r,hash3(bid,m,183)<0.4?':':'.',17,fog);return}
+      default:{                                                   // ramen bar: noren + menu
+        if((mloc===dpos-1||mloc===dpos+2)&&fy<0.45){put(x,r,'"',10,fog);return}
+        if(mloc===((dpos+3)%8)&&fy>0.25&&fy<0.7){put(x,r,'#',12,fog);return}
+        put(x,r,((fy*6)|0)&1?'=':'-',1,fog);return}
+    }
+  }
+  if(story===1){
+    if(h>=4&&fog<2&&(arch===0||arch===2||arch===3||arch===7||arch===8||arch===9)){ // lit fascia band
+      if(fy>0.2&&fy<0.8){
+        if(mloc===0||mloc===7){put(x,r,'+',3,fog);return}
+        const sp2=hash3(bid,m-((NOW/(arch===2?Math.max(300,FLASH_MS):340))|0),187); // crawling sign text
+        put(x,r,sp2<0.28?'#':sp2<0.6?'o':'=',sp2<0.28?shopHue:sp2<0.6?shopHue+1:3,fog);return}
+      put(x,r,'-',3,fog);return}
+    if(arch===4&&fy>0.6){put(x,r,'=',1,fog);return}               // lobby canopy
+    if(arch===8&&(mloc===dpos||mloc===dpos+1)){                   // bath steam curling up
+      const stq=((NOW/300+m*3)|0)%4;
+      if(stq<2){put(x,r,'~',stq===0?4:3,fog);return}}
+  }
+  /* hanging vertical neon, denser: the street reads as a canyon of signs */
+  if(story>=2&&story<=5&&fog<2&&hash3(bid,cellu,29)<0.46){
     if(mloc===2+((hash3(bid,cellu,31)*5)|0)){
       const sk=8+2*WPICK[(hash3(bid,cellu,13)*16)|0];
-      put(x,r,story===4?'+':(fy<0.5?'#':'o'),sk,fog);return}}
+      const flick=hash3(bid,cellu,(NOW/600)|0)<0.07;
+      put(x,r,story===5?'+':(fy<0.5?'#':'o'),flick?sk+1:sk,fog);return}}
+  if(story>=2&&story<=4&&fog<1&&hash3(bid,cellu,83)<0.24){
+    if(mloc===1){const sk2=8+2*WPICK[(hash3(bid,cellu,89)*16)|0];
+      put(x,r,story===4?'+':(fy<0.5?'o':'#'),sk2+(story&1),fog);return}}
   /* fire escape zigzag near cell edge */
-  if(mloc===0&&story>=1&&story<h-2&&hash2(bid,63)<0.22){
+  if(mloc===0&&story>=1&&story<h-2&&fog<2&&hash2(bid,63)<0.22){
     put(x,r,(story&1)?'%':'x',3,fog);return}
-  const mm=((m%3)+3)%3, win=(m-mm)/3|0;
-  if(hash3(bid,story>>1,88)<0.06){                                // blazing floors
+  const mmq=((mq%3)+3)%3, win=(mq-mmq)/3|0, mm=((m%3)+3)%3;
+  if(fog<2&&hash3(bid,story>>1,88)<0.05){                         // blazing floors
     const b=hash3(bid,m,story);
     put(x,r,b<0.6?'#':'=',b<0.15?5:hk,fog);return}
-  if(fy>0.8){put(x,r,'-',bK,fog);return}                          // floor slab
-  if(mm===2){put(x,r,'.',bK,fog);return}                          // mullion
+  if(fog<1&&fy>0.8){put(x,r,'-',bK,fog);return}                   // floor slab, nearest only
+  if(fog<1&&mm===2){put(x,r,'.',bK,fog);return}                   // mullion, nearest only
   const field=hash3(bid,story>>2,win>>2);       // coherent glowing facade patches
   const gmul=0.35+hash2(bid,17)*1.2;            // per-building brightness identity
-  const p=(field<0.45?0.85:field<0.75?0.5:0.15)*(story<3?1.2:1)*(side?0.55:1)*gmul;
-  const lit=hash3(bid,story,win*7)<p;
-  if(lit){const b=hash3(bid,win*3,story*5);
+  const p=(field<0.45?0.85:field<0.75?0.5:0.15)*(story<3?1.2:1)*(side?0.55:1)*gmul
+         *[1,0.8,0.5,0.3][fog];
+  const lit=hash3(bid,sq,win*7)<p;
+  if(lit){const b=hash3(bid,win*3,sq*5);
     const wh=hash3(bid,win,9)>=0.7;
     put(x,r,b<0.08?'@':b<0.5?'o':'"',b<0.08?5:wh?4:(b<0.75?hk:hk+1),fog)}
-  else{const dd=hash3(bid+m,story,2);                             // dense body fill
-    if(dd<0.72)put(x,r,dd<0.4?'.':dd<0.6?',':':',dd<0.68?bK:3,fog);
-    else put(x,r,' ',bK,fog)}
+  else if(fog>=2){                                                // far body: quiet, steady
+    const dd=hash3(bid+(m>>2),sq,2);
+    put(x,r,dd<0.10?'.':' ',bK,fog)}
+  else if(fog===1){                                               // mid body: coarse and calm
+    const dd=hash3(bid+((m>>1)<<1),story,2);
+    put(x,r,dd<0.16?'.':dd<0.26?',':' ',bK,fog)}
+  else{const m3=Math.floor(wc*12), fy3=(ys*2)|0;                  // body fill, calmer pitch
+    const dd=hash3(bid+m,story,2), fine=hash3(bid+m3,fy3,4);
+    if(fine<0.05){put(x,r,'|',3,fog)}                               // panel seams up close
+    else if(fine<0.09){put(x,r,'-',bK,fog)}
+    else if(dd<0.72)put(x,r,fine<0.45?'.':fine<0.62?',':':',dd<0.68?bK:3,fog);
+    else put(x,r,fine<0.2?'.':' ',bK,fog)}
 }
 function roofTex(x,r,ix,iz,fx,fz,h,fog){
   fx-=G*Math.floor(fx/G);fz-=G*Math.floor(fz/G);ix=fx|0;iz=fz|0;
@@ -384,6 +591,7 @@ function roofTex(x,r,ix,iz,fx,fz,h,fog){
     put(x,r,hash3(gx,gz,9)<0.35?'%':'.',hash3(gx,gz,11)<0.5?26:27,fog);return}
   if(hash2(gx*7+1,gz*5+3)<0.07){put(x,r,'#',3,fog);return}        // AC / vents
   const dd=hash3(gx,gz,1);
+  if(fog>=1){put(x,r,dd<0.08?'.':' ',1,fog);return}
   put(x,r,dd<0.22?'.':dd<0.32?',':' ',1,fog);
 }
 function groundTex(x,r,fx,fz,fog){
@@ -403,7 +611,7 @@ function groundTex(x,r,fx,fz,fog){
     const rc=(fx*6)|0;
     if(hash2(rc,7)<0.12&&hash3(rc,(fz*2)|0,1)<0.55){
       const hs=hash2(rc,3);
-      put(x,r,':',hs<0.4?9:hs<0.7?13:21,fog);return}
+      put(x,r,':',hs<0.5?9:25,fog);return}               // cool reflections only
     put(x,r,wv<0.5?'.':' ',25,fog);return}
   if(t){                                                          // roads & bridges
     const ax=ri>=rj;
@@ -411,24 +619,24 @@ function groundTex(x,r,fx,fz,fog){
     const wd=ax?RIW[ix]:RJW[iz], lg=ax?fz:fx;
     if(ter===1&&(u<0.12||u>wd-0.12)){put(x,r,'=',2,fog);return}   // bridge railing
     if(ri&&rj&&ter!==1){                                          // intersection
-      const fu=fx-ix, fv=fz-iz, cyc=(NOW/3000+hash2(ix,iz))%1;
-      if(fu<0.14&&fv<0.14){put(x,r,'o',cyc<0.45?26:cyc<0.55?8:6,fog);return} // traffic light
-      if((fu<0.22||fu>0.78)&&((fz*4)|0)%2===0){put(x,r,':',2,fog);return}    // crosswalk
-      if((fv<0.22||fv>0.78)&&((fx*4)|0)%2===0){put(x,r,':',2,fog);return}}
-    /* street lamps every 2 units: glowing pools on the pavement */
+      const fu=fx-ix, fv=fz-iz;
+      if((fu<0.26||fu>0.74)&&((fz*8)|0)%2===0){put(x,r,'=',2,fog);return}    // zebra crossing
+      if((fv<0.26||fv>0.74)&&((fx*8)|0)%2===0){put(x,r,'=',2,fog);return}}
+    /* faint lamp shimmer on the wet asphalt: dots, not discs */
     const ll=Math.round(lg/2)*2, lu=u<wd/2?0.14:wd-0.14;
     const dl=Math.hypot(lg-ll,u-lu);
-    if(dl<0.5&&t<3){
-      if(dl<0.06){put(x,r,'*',5,fog);return}
-      const b=1-dl/0.5, pv=hash2((fx*7)|0,(fz*7)|0);
-      if(pv<b*0.9){put(x,r,pv<b*0.35?'#':pv<b*0.6?':':'.',pv<b*0.25?7:9,fog);return}}
+    if(dl<0.22&&t<3){const pv=hash2((fx*9)|0,(fz*9)|0);
+      if(pv<0.6-dl*2.2){put(x,r,pv<0.18?':':'.',9,fog);return}}
     if(t<3&&ter!==1&&(u<0.25||u>wd-0.25)){                        // sidewalk + furniture
       if(Math.abs(u-0.25)<0.05||Math.abs(u-(wd-0.25))<0.05){
         put(x,r,'=',2,fog);return}                                // bright curb line
       const fu=hash2((lg*2)|0,(ax?ix:iz)*3);
-      if(fu<0.03){put(x,r,'#',19,fog);return}                     // postal box
-      if(fu<0.055){put(x,r,'*',5,fog);return}                     // street lamp
+      if(fu<0.02){put(x,r,'i',6,fog);return}                      // hydrant
+      if(fu<0.045){put(x,r,'#',19,fog);return}                    // postal box
       if(fu<0.08){put(x,r,'o',9+2*((fu*997|0)%8),fog);return}     // vending glow
+      if(fu>0.08&&fu<0.10){const stm=((NOW/350+lg*3)|0)%3;        // steam grate, breathing
+        put(x,r,stm===0?'~':stm===1?':':'.',stm===0?35:3,fog);return}
+      if(Math.abs(lg-Math.round(lg))<0.03){put(x,r,'-',29,fog);return} // expansion joints
       const sg=hash2((fx*13)|0,(fz*13)|0);
       put(x,r,sg<0.55?':':'.',sg<0.15?28:29,fog);return}
     if(t===2&&Math.abs(u-wd/2)<0.05){put(x,r,':',9,fog);return}   // avenue center line
@@ -436,9 +644,18 @@ function groundTex(x,r,fx,fz,fog){
       if(Math.abs(u-wd/2)<0.07){put(x,r,'=',1,fog);return}        // median
       if((u>0.15&&u<0.24)||(u>wd-0.24&&u<wd-0.15)){put(x,r,':',3,fog);return}}
     const lanes=t===1?[0.5]:t===2?[wd*0.27,wd*0.73]:[wd*0.3,wd*0.7];
-    for(const lc of lanes)if(Math.abs(u-lc)<0.04&&(lg*1.6)%1<0.22){
-      put(x,r,'.',3,fog);return}                                  // small white dashes
+    for(const lc of lanes){
+      if(Math.abs(u-lc)<0.04&&(lg*1.6)%1<0.22){
+        put(x,r,'.',3,fog);return}                                // small white dashes
+      if(Math.abs(u-lc)<0.12&&hash2((fx*6)|0,(fz*6)|0)<0.18){
+        put(x,r,':',0,fog);return}}                               // tire sheen along the lanes
+    if(t<3&&(Math.abs(u-0.3)<0.03||Math.abs(u-(wd-0.3))<0.03)&&((lg*2)|0)%4===0){
+      put(x,r,'=',1,fog);return}                                  // storm drains at the gutter
     if(hash2((fx*2)|0,(fz*2)|0)<0.015){put(x,r,'o',1,fog);return} // manhole
+    const stn=hash2((fx*3)|0,(fz*3)|0);
+    if(stn<0.03){put(x,r,stn<0.012?'o':':',0,fog);return}         // oil stains
+    if(hash2(((fx*1.5)|0)*7,((fz*1.5)|0)*5)<0.05&&hash2((fx*8)|0,(fz*8)|0)<0.5){
+      put(x,r,':',1,fog);return}                                  // tarmac patches
     put(x,r,hash2((fx*11)|0,(fz*11)|0)<0.15?'.':' ',0,fog);return}
   if(ter===3){                                                    // riverside promenade
     const ux3=fx-ix,uz3=fz-iz;
@@ -450,6 +667,9 @@ function groundTex(x,r,fx,fz,fog){
     put(x,r,sg<0.45?':':sg<0.8?'.':' ',sg<0.12?28:29,fog);return}
   if(ter===2){                                                    // park: lawn + paths
     if(((fx*0.5+fz*0.5)%3)<0.22){put(x,r,':',3,fog);return}
+    const fl=hash2((fx*4)|0,(fz*4)|0);
+    if(fl<0.012&&hash2((fx*9)|0,(fz*9)|0)<0.4){                   // sparse flowers, mostly dim
+      put(x,r,'*',fl<0.003?20:fl<0.007?21:11,fog);return}
     const tv=hash2((fx*5)|0,(fz*5)|0);
     put(x,r,tv<0.25?'.':tv<0.4?',':' ',27,fog);return}
   const ux2=fx-ix,uz2=fz-iz;                              // contact shadow at building feet
@@ -457,6 +677,9 @@ function groundTex(x,r,fx,fz,fog){
       (uz2<0.3&&cellH(ix,iz-1)>2)||(uz2>0.7&&cellH(ix,iz+1)>2))){
     put(x,r,' ',0,fog);return}
   const hh=hash2((fx*9)|0,(fz*9)|0);
+  if(hh<0.025){put(x,r,'#',1,fog);return}                         // crates & dumpsters
+  if(hh<0.05){put(x,r,'%',27,fog);return}                         // weeds in the cracks
+  if(hh<0.075&&hash3((fx*2)|0,(fz*2)|0,3)<0.3){put(x,r,'~',25,fog);return} // puddles
   put(x,r,hh<0.2?',':hh<0.35?'.':' ',0,fog);
 }
 
@@ -479,6 +702,7 @@ function renderColumn(x,dirX,dirZ,plX,plZ){
       const rTop=Math.max(0,Math.ceil(HOR+(camH-dH)*pV/dCur));
       if(dCur>0.05){
         const wc=side===0?pz+dCur*rdz:px+dCur*rdx;
+        PD=dCur;
         for(let r=Math.min(bot,H-1);r>=rTop;r--){
           const y=camH-(r-HOR)*dCur/pV;
           if(y>dH)continue;
@@ -491,9 +715,11 @@ function renderColumn(x,dirX,dirZ,plX,plZ){
       }
       bot=Math.min(bot,rTop-1);
       const rFar=Math.max(0,Math.ceil(HOR+(camH-dH)*pV/Math.max(0.01,dNext)));
-      for(let r=Math.min(bot,H-1);r>=rFar;r--){
+      const rB4=Math.min(bot,H-1);
+      if(rB4>=rFar)FBGB[208+fogOf(dCur)].push(x,rFar,rB4);   // solid deck-top asphalt
+      for(let r=rB4;r>=rFar;r--){
         const d=(camH-dH)*pV/(r-HOR);
-        groundTex(x,r,px+rdx*d,pz+rdz*d,fogOf(d));
+        PD=d;groundTex(x,r,px+rdx*d,pz+rdz*d,fogOf(d));
       }
       bot=Math.min(bot,rFar-1);gmax=dNext;
     }else if(h===0){
@@ -503,6 +729,7 @@ function renderColumn(x,dirX,dirZ,plX,plZ){
       if(!isW&&wasW){                            // embankment wall or arched bridge underside
         const rTopB=Math.max(0,Math.ceil(HOR+camH*pV/dCur));
         const rBW=Math.min(bot,H-1), fgb2=fogOf(dCur);
+        PD=dCur;
         if(rBW>=rTopB){
           if(bridge){                            // arches: piers + dark water through the opening
             const wc2=side===0?pz+dCur*rdz:px+dCur*rdx;
@@ -533,13 +760,27 @@ function renderColumn(x,dirX,dirZ,plX,plZ){
       }
       for(let r=rB3;r>=rFar;r--){
         const d=lvl*pV/(r-HOR);
-        groundTex(x,r,px+rdx*d,pz+rdz*d,fogOf(d));
+        PD=d;groundTex(x,r,px+rdx*d,pz+rdz*d,fogOf(d));
       }
       bot=Math.min(bot,rFar-1);gmax=dNext;wasW=isW;
     }else{
       wasW=false;
       const fog=fogOf(dCur), hw2=h*STY;
       const rTop=Math.max(0,Math.ceil(HOR+(camH-hw2)*pV/dCur));
+      if(GHOST.has(BID[ci])&&dCur<BOOM+1.6){               // translucent: dithered, no occlusion
+        const rB=Math.min(bot,H-1);
+        if(dCur>0.05&&rB>=rTop){
+          PD=dCur;
+          const wc=side===0?pz+dCur*rdz:px+dCur*rdx;
+          const mg=Math.floor(wc*8), mlG=mg-Math.floor(wc)*8;
+          put(x,rTop,'=',19,fog);                          // roofline stays crisp
+          for(let r=rB;r>rTop;r--){
+            if(mlG===0||mlG===7){put(x,r,'|',19,fog);continue}   // corner lines
+            const dth=hash3(x,r,13);
+            if(dth<0.30)put(x,r,dth<0.08?'#':dth<0.18?':':'.',dth<0.08?1:29,fog);
+          }
+        }
+      }else{
       {
         const wc=side===0?pz+dCur*rdz:px+dCur*rdx;
         const bid=BID[ci];
@@ -554,6 +795,7 @@ function renderColumn(x,dirX,dirZ,plX,plZ){
           if(r2>r1&&r1<=rB)FBGB[fgb+4].push(x,r1,Math.min(r2-1,rB));
           if(r2<=rB)FBGB[fgb+8].push(x,Math.max(r2,rTop),rB);
         }
+        PD=dCur;
         if(dCur>0.05)for(let r=rB;r>=rTop;r--){
           const y=camH-(r-HOR)*dCur/pV;
           if(y<=hw2)wallTex(x,r,bid,side,wc,y/STY,h,fog,mxx,mzz);
@@ -561,10 +803,10 @@ function renderColumn(x,dirX,dirZ,plX,plZ){
         /* light trails rising off the roofline */
         if(rTop<=bot&&rTop>0&&h>=5){
           const cr2=h>=16?(hash2(bid,101)*12)|0:0;
-          if(cr2===4||cr2===5){                           // spire crown
+          if(cr2===4){                                    // spire crown (rare)
             const cm=Math.floor(wc*8)-Math.floor(wc)*8;
-            if(cm===3||cm===4){
-              const sl=(4+hash2(bid,103)*12)|0;
+            if(cm===3){
+              const sl=(3+hash2(bid,103)*7)|0;
               for(let k=1;k<=sl;k++){const r2=rTop-k;if(r2<0)break;put(x,r2,'|',3,fog)}
               const on=((NOW/900+hash2(bid,7))%1)<0.5;
               if(rTop-sl-1>=0)put(x,rTop-sl-1,on?'*':'+',on?6:3,fog)}}
@@ -577,17 +819,19 @@ function renderColumn(x,dirX,dirZ,plX,plZ){
         if(rB2>=rFar)FBGB[192+fog].push(x,rFar,rB2);   // roof slab fill
         for(let r=rB2;r>=rFar;r--){
           const d=(camH-hw2)*pV/(r-HOR);
-          roofTex(x,r,mxx,mzz,px+rdx*d,pz+rdz*d,h,fogOf(d));
+          PD=d;roofTex(x,r,mxx,mzz,px+rdx*d,pz+rdz*d,h,fogOf(d));
         }
         bot=Math.min(bot,rFar-1);
+      }
       }
     }
     if(nSide===0){dCur=tx;tx+=ddx;mx+=sx}else{dCur=tz;tz+=ddz;mz+=sz}
     side=nSide;
   }
   GMAX[x]=gmax;SKYB[x]=Math.min(bot,H-1);
+  PD=900;                                                // sky sits behind everything
   /* layered night sky: drifting clouds with lit edges, sparse stars */
-  const wcf=(ang/FOV)*W+x, drift=NOW*0.00003;            // near-still cloud drift
+  const wcf=(angV/FOV)*W+x, drift=NOW*0.00003;           // near-still cloud drift
   for(let r=Math.min(SKYB[x],H-1);r>=0;r--){
     if(CH[r*W+x]!==' ')continue;
     const n=vn(wcf*0.055+drift,r*0.10)*0.65+vn(wcf*0.14+40,r*0.22+drift*2)*0.35;
@@ -620,123 +864,272 @@ function laneOff(c){return c.ty===1?0.5:c.ty===2?(c.dir>0?c.ty*0.27:c.ty*0.73)
 const planes=[];
 for(let k=0;k<3;k++)planes.push({x:rnd()*G,z:rnd()*G,a:rnd()*6.28,alt:10+rnd()*8,sp:3+rnd()*2});
 for(let k=0;k<2;k++)planes.push({x:rnd()*G,z:rnd()*G,a:rnd()*6.28,alt:7+rnd()*3,sp:1.2+rnd(),heli:1});
+const BOOMS=[];let lastBoomT=0;                         // laser impact fireballs
+function capClear(x,z,a2,len,alt){                      // hull corridor free of towers?
+  const cx2=Math.cos(a2),cz2=Math.sin(a2);
+  const st=Math.max(0.04,0.7/len);
+  for(let u=-0.5;u<=0.51;u+=st){
+    const i=((Math.floor(x+cx2*len*u)%G)+G)%G, j=((Math.floor(z+cz2*len*u)%G)+G)%G;
+    if(HGT[j*G+i]*STY>alt-0.25)return false}
+  return true}
+const CAPS=[];                                          // dragons, on the flight level
+function capFar(x,z,self){                              // keep dragons apart
+  for(const o of CAPS){if(o===self)continue;
+    let dx=x-o.x,dz=z-o.z;dx-=G*Math.round(dx/G);dz-=G*Math.round(dz/G);
+    if(dx*dx+dz*dz<144)return false}
+  return true}
+function capSpawn(g,avX,avZ){                           // place it in front of the player
+  const aMin=(g.alt0||g.alt)-0.75;                        // clearance at the breathing low point
+  const farFrom=(x,z)=>{if(avX===undefined)return true;   // and away from where it just died
+    let dx=x-avX,dz=z-avZ;dx-=G*Math.round(dx/G);dz-=G*Math.round(dz/G);
+    return dx*dx+dz*dz>625};
+  for(let t=0;t<60;t++){
+    const aV=ang+(rnd()-0.5)*1.0, d=20+rnd()*14;
+    const x=((px+Math.cos(aV)*d)%G+G)%G, z=((pz+Math.sin(aV)*d)%G+G)%G;
+    const na=rnd()*6.28;
+    if(farFrom(x,z)&&capFar(x,z,g)&&capClear(x,z,na,g.len,aMin)){g.x=x;g.z=z;g.a=na;return}}
+  for(let t=0;t<60;t++){const x=rnd()*G,z=rnd()*G;
+    if(farFrom(x,z)&&capFar(x,z,g)&&capClear(x,z,g.a,g.len,aMin)){g.x=x;g.z=z;return}}}
+for(let k=0;k<3;k++){
+  const cAlt=7.0+k*0.3, cLen=7+k*2.5;
+  const g={x:0,z:0,a:rnd()*6.28,sp:0.4+rnd()*0.5,len:cLen,alt:cAlt,alt0:cAlt,alt00:cAlt,ph:rnd()*97,hp:60};
+  capSpawn(g);CAPS.push(g);
+}
+
 const boats=[];
 for(let k=0;k<4;k++)boats.push({t:10+rnd()*(G-20),dir:rnd()<0.5?1:-1,sp:0.6+rnd()*0.6});
 const riverX=z=>G*0.42+Math.sin(z*0.09)*9+z*0.12;
 
 /* ---------- input ---------- */
-const keys={};let showMap=true,drag=null;
-addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=1;
-  if(e.key.toLowerCase()==='m')showMap=!showMap;
-  if(e.key.toLowerCase()==='g'){walkMode=!walkMode;if(!walkMode)velH=0}
+const keys={};let showMap=false,drag=null;
+const LOOK=0.6;          // turn sensitivity: lower is calmer. Scales drag, trackpad and arrow steering.
+const keyEcho=(k,v)=>{try{if(window.parent!==window)   // the host mirrors key state
+  window.parent.postMessage({t:'keyecho',k,v},'*')}catch(_){}};
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();keys[k]=1;keyEcho(k,1);
   if(!e.metaKey&&e.key!=='F12')e.preventDefault()});
-addEventListener('keyup',e=>keys[e.key.toLowerCase()]=0);
-addEventListener('mousemove',e=>{                  // drag to look: grab the world
-  if(drag){ang=drag.a-(e.clientX-drag.x)*0.0038;
-    pitch=Math.max(-1.5,Math.min(1.9,drag.p+(e.clientY-drag.y)*0.0016))}});
-let web=null,airborne=false;
+addEventListener('keyup',e=>{const k=e.key.toLowerCase();keys[k]=0;keyEcho(k,0)});
+addEventListener('blur',()=>{for(const k in keys)keys[k]=0});   // no stuck keys on focus loss
+let paused=false,rafId=0;
+addEventListener('message',e=>{                    // embedded: the host page lends us its inputs
+  const d=e.data;if(!d||typeof d!=='object')return;
+  if(d.t==='pause'){paused=!!d.v;                  // fully off-screen: full freeze
+    // Exactly one live chain, always. A hidden tab does not run the frame it
+    // already holds, it parks it -- so pausing has to CANCEL that frame, and
+    // resuming has to arm a new one only when none is outstanding. Without
+    // both halves, a hide/show cycle whose resume message lands before the
+    // parked frame leaves two loops running, and every later cycle adds
+    // another until the phone gives up.
+    if(paused){if(rafId)cancelAnimationFrame(rafId);rafId=0}
+    else if(!rafId){last=performance.now();rafId=requestAnimationFrame(frame)}
+    return}
+  if(d.t==='key')keys[d.k]=d.v?1:0;
+  else if(d.t==='wheel')ang+=d.dx*0.0025*LOOK;
+  else if(d.t==='cursor'){cursX=d.x;cursY=d.y}
+  else if(d.t==='allup'){                          // scrolled off the hero: drop everything
+    for(const k in keys)keys[k]=0}
+});
+let cursX=0.5,cursY=0.5;
+/* Looking around is a drag, on every device. This used to be applied from
+   mousemove, which does not fire during a touch drag -- so pointerdown set
+   `drag` and nothing on a phone ever consumed it. pointermove carries mouse,
+   pen and touch down one path, and the canvas is already touch-action:none so
+   the drag cannot turn into a scroll. The tilt pan that stood in for this on
+   touch goes with it: it needed an iOS permission prompt to work at all, and
+   it swung the view against the hand holding the phone. */
+cv.addEventListener('pointermove',e=>{
+  if(drag)ang=drag.a-(e.clientX-drag.x)*0.0026*LOOK});
+/* iOS Safari still reads a downward drag near the top of the page as
+   pull-to-refresh even with touch-action:none AND overscroll-behavior:none on
+   every element in the chain -- and a reload landing mid-flight is
+   indistinguishable, to whoever is playing, from the game taking the tab down.
+   Nothing in this document scrolls, so there is no default worth keeping. */
+addEventListener('touchmove',e=>{if(e.cancelable)e.preventDefault()},{passive:false});
+addEventListener('mousemove',e=>{                  // idle cursor pans the view (mouse only)
+  cursX=e.clientX/innerWidth;cursY=e.clientY/innerHeight});
+let airborne=false;
 cv.addEventListener('contextmenu',e=>e.preventDefault());
-function webTry(cxp,cyp){                          // raycast a web line at the cursor
-  const col=cxp*(cv.width/innerWidth)/CW, row=cyp*(cv.height/innerHeight)/LH;
-  const cxs=2*col/W-1;
-  const dX=Math.cos(ang),dZ=Math.sin(ang);
-  const rdx=dX+(-dZ*tanH)*cxs, rdz=dZ+(dX*tanH)*cxs;
-  const slope=(HOR-row)/pV;
-  for(let t=1.2;t<46;t+=0.3){
-    const wx=px+rdx*t, wz=pz+rdz*t, wy=camH+slope*t;
-    if(wy<0.1)break;
-    const ii=((Math.floor(wx)%G)+G)%G, jj=((Math.floor(wz)%G)+G)%G;
-    if(HGT[jj*G+ii]*STY>=wy){
-      web={x:wx,y:wy,z:wz,len:Math.max(2,Math.hypot(wx-px,wy-camH,wz-pz)*0.97)};
-      airborne=true;return}
-  }
-  const t2=30;                                    // nothing hit: skyhook along the aim
-  const sx2=px+rdx*t2, sz2=pz+rdz*t2, sy2=Math.max(camH+9,camH+slope*t2+6);
-  web={x:sx2,y:sy2,z:sz2,len:Math.max(4,Math.hypot(sx2-px,sy2-camH,sz2-pz)*0.97)};
-  airborne=true;
-}
 cv.addEventListener('pointerdown',e=>{
   cv.setPointerCapture(e.pointerId);              // hold survives leaving the canvas
-  if(e.button===2){webTry(e.clientX,e.clientY);return}
   drag={x:e.clientX,y:e.clientY,a:ang,p:pitch}});
-cv.addEventListener('pointerup',e=>{if(e.button===2){web=null;return}drag=null});
-cv.addEventListener('pointercancel',()=>{web=null;drag=null});
-addEventListener('wheel',e=>{e.preventDefault();       // trackpad two-finger look
-  ang+=e.deltaX*0.0025;
-  pitch=Math.max(-1.5,Math.min(1.9,pitch-e.deltaY*0.0022));
+cv.addEventListener('pointerup',()=>{drag=null});
+cv.addEventListener('pointercancel',()=>{drag=null});
+addEventListener('wheel',e=>{e.preventDefault();       // trackpad two-finger steer
+  ang+=e.deltaX*0.0025*LOOK;
 },{passive:false});
 let velX=0,velZ=0,velH=0,walkMode=false;
-const GRAV=2.6, EYE=0.12;
-const topAt=(x,z)=>{const i=((Math.floor(x)%G)+G)%G,j=((Math.floor(z)%G)+G)%G;
-  return HGT[j*G+i]*STY};
-function hitsWall(nx,nz,feet){const m=0.18;              // solid buildings
-  return topAt(nx-m,nz-m)>feet+0.06||topAt(nx+m,nz-m)>feet+0.06||
-         topAt(nx-m,nz+m)>feet+0.06||topAt(nx+m,nz+m)>feet+0.06}
-function groundAt(x,z){const m=0.18;                     // surface underfoot
-  return Math.max(topAt(x-m,z-m),topAt(x+m,z-m),topAt(x-m,z+m),topAt(x+m,z+m))}
+const GRAV=2.6, EYE=0.12, STEP=0.06, DECK=0.5, DECKB=0.2, CRUISE=7.0;
+const CKX=[0,0.18,0.18,-0.18,-0.18], CKZ=[0,0.18,-0.18,0.18,-0.18];
+function pierGap(i,j,ux,uz){                       // the railing opens where a pier meets it
+  if(Math.abs(uz-0.5)<0.16&&((PIER[j*G+i+1]===1&&ux>0.8)||(PIER[j*G+i-1]===2&&ux<0.2)))return true;
+  return Math.abs(ux-0.5)<0.16&&((PIER[(j+1)*G+i]===3&&uz>0.8)||(PIER[(j-1)*G+i]===4&&uz<0.2))}
+function solidTop(x,z){                            // height-aware solid world at a point
+  x-=G*Math.floor(x/G);z-=G*Math.floor(z/G);
+  const i=x|0,j=z|0,cc=j*G+i,h=HGT[cc];
+  if(h)return h*STY;
+  const ri=RI[i],rj=RJ[j];
+  if(TER[cc]===1){
+    if((ri&&BRI[i])||(rj&&BRJ[j])){                // bridge deck, railed at both edges
+      const ax=ri>=rj, u=ax?x-(i-RIO[i]):z-(j-RJO[j]), wd=ax?RIW[i]:RJW[j];
+      return(u<0.12||u>wd-0.12)?0.35:0}
+    const pr=PIER[cc];
+    if(pr){const ux=x-i,uz=z-j;                    // pier planks are dry footing
+      const on=pr<=2?(Math.abs(uz-0.5)<0.16&&(pr===1?ux<0.85:ux>0.15))
+                    :(Math.abs(ux-0.5)<0.16&&(pr===3?uz<0.85:uz>0.15));
+      if(on)return 0}
+    return -0.5}                                   // open water: a real drop
+  if(TER[cc]===3){                                 // promenade railing along the water line
+    const ux=x-i,uz=z-j;
+    if(((TER[cc+1]===1&&ux>0.82)||(TER[cc-1]===1&&ux<0.18)||
+        (TER[cc+G]===1&&uz>0.82)||(TER[cc-G]===1&&uz<0.18))&&!pierGap(i,j,ux,uz))return 0.35}
+  return 0}
+const deckAt=(x,z)=>{x-=G*Math.floor(x/G);z-=G*Math.floor(z/G);
+  const i=x|0,j=z|0;return HGT[j*G+i]===0&&(RI[i]===3||RJ[j]===3)};
+function wallTop(x,z){                             // solidTop, but a building's cells
+  x-=G*Math.floor(x/G);z-=G*Math.floor(z/G);       // each report the whole mass
+  const h=CHGT[(z|0)*G+(x|0)];
+  return h?h*STY:solidTop(x,z)}
+function hitsWall(nx,nz,feet){                     // walls, railings, and the highway slab
+  for(let k=0;k<5;k++){
+    const cx=nx+CKX[k],cz=nz+CKZ[k];
+    if(wallTop(cx,cz)>feet+STEP)return true;
+    if(feet<DECK-STEP&&feet+0.13>DECKB&&deckAt(cx,cz))return true}
+  return false}
+function groundAt(x,z,feet){                       // highest support at or below the feet
+  const ctr=solidTop(x,z);
+  let g=-0.5;
+  for(let k=0;k<5;k++){
+    const cx=x+CKX[k],cz=z+CKZ[k];
+    if(ctr>-0.4||k===0){                           // center over open water: banks can't hold you
+      const t=solidTop(cx,cz);
+      if(t<=feet+STEP&&t>g)g=t}
+    if(DECK<=feet+STEP&&DECK>g&&deckAt(cx,cz))g=DECK}
+  return g}
+function toast(s){}                                      // GUI deleted: rescues are silent
+let lastSolid={x:20.5,z:20.5,h:0.12},dunkT=0,trapT=0,clipN=0;
+let BOOM=3.6,bankS=0,tiltS=0,prevAng=0,flyP=false;
+const GHOST=new Set();                                   // buildings the camera sits inside
+spawnScan:for(let j=14;j<G-14;j++)for(let i=14;i<G-14;i++)   // a safe crossroads to fish people to
+  if(RI[i]===1&&RJ[j]===1&&!TER[j*G+i]&&!TRAP[j*G+i]){lastSolid={x:i+0.5,z:j+0.5,h:0.12};break spawnScan}
+function rescue(msg){px=lastSolid.x;pz=lastSolid.z;camH=lastSolid.h;   // the exact spot they stood
+  velX=velZ=velH=0;airborne=false;dunkT=trapT=0;toast(msg)}
+px=lastSolid.x;pz=lastSolid.z;camH=CRUISE;              // begin over a crossroads,
+ang=Math.atan2(60.5-pz,72.5-px);angV=ang;               // facing the reactor skyline
+{const g0=CAPS[0];                                      // the opener: broadside, dead ahead
+ g0.alt0=8.4;g0.alt=8.4;                                 // rides high, clears the rooftops
+ let placed=false;
+ outerO: for(const aBase of [8.4,9.3]){
+   g0.alt0=aBase;g0.alt=aBase;
+   for(const d of [8,10,12,15]){
+     for(const off of [Math.PI/2,-Math.PI/2,Math.PI/2+0.25,-Math.PI/2-0.25]){
+       const x=((px+Math.cos(ang)*d)%G+G)%G, z=((pz+Math.sin(ang)*d)%G+G)%G;
+       const na=ang+off;
+       if(!capClear(x,z,na,g0.len,aBase-0.75))continue;   // clear even at the breathing low
+       let clearLOS=true;
+       for(let t=2;t<d-1;t+=0.6)
+         if(solidTop(px+Math.cos(ang)*t,pz+Math.sin(ang)*t)>aBase-0.9){clearLOS=false;break}
+       if(!clearLOS)continue;
+       g0.x=x;g0.z=z;g0.a=na;placed=true;break outerO;}}}
+ if(!placed)capSpawn(g0);}
 function move(dt){
-  const run=keys['shift']?3:1;
-  if(keys['arrowleft'])ang-=1.8*dt; if(keys['arrowright'])ang+=1.8*dt;
-  if(keys['arrowup'])pitch=Math.min(1.9,pitch+0.8*dt);
-  if(keys['arrowdown'])pitch=Math.max(-1.5,pitch-0.8*dt);
+  const run=keys['shift']?2:1;
+  // The mouse/tilt pan is a separate offset laid on top of `ang`, so a leaning
+  // cursor means the arrows steer against a heading the player never set.
+  // Taking aim recentres the pan; moving the mouse again re-engages it.
+  if(keys['arrowleft']||keys['arrowright']){
+    cursX=0.5;cursY=0.5;
+    if(keys['arrowleft'])ang-=2.6*LOOK*dt; if(keys['arrowright'])ang+=2.6*LOOK*dt;}
   const c=Math.cos(ang),s=Math.sin(ang);let fx=0,fz=0,fh=0;
   if(keys['w']){fx+=c;fz+=s} if(keys['s']){fx-=c;fz-=s}
   if(keys['a']){fx+=s;fz-=c} if(keys['d']){fx-=s;fz+=c}
-  if(keys['r']||keys[' '])fh+=1; if(keys['f']||keys['control'])fh-=1;
+  if(keys['r']||keys[' '])fh+=1; if(keys['control'])fh-=1;
   const l=Math.hypot(fx,fz)||1;
-  const ground=groundAt(px,pz);
-  if(web||airborne||walkMode){                           // gravity world
-    const grounded=!web&&camH<=ground+EYE+0.02;
+  const ground=groundAt(px,pz,camH-EYE);
+  if(airborne||walkMode){                                 // gravity world
+    const grounded=camH<=ground+EYE+0.02;
     velH-=GRAV*dt;
     if(walkMode&&grounded){
       const spw=0.9*(keys['shift']?2.2:1);               // on foot
       const k=1-Math.exp(-dt*10);
       velX+=((fx/l)*spw-velX)*k; velZ+=((fz/l)*spw-velZ)*k;
-      if(keys[' '])velH=1.5;                             // jump
+      if(keys[' ']&&ground>-0.4)velH=1.5;                // jump (water gives no footing)
     }else{
       velX+=(fx/l)*4*dt; velZ+=(fz/l)*4*dt;              // air control
       if(!walkMode)velH+=fh*3*dt;
     }
-    if(web){                                             // rope constraint (pendulum)
-      let dx=px-web.x,dz=pz-web.z;
-      dx-=G*Math.round(dx/G);dz-=G*Math.round(dz/G);
-      const dy=camH-web.y, d=Math.hypot(dx,dy,dz);
-      if(d>web.len){
-        const nx=dx/d,ny=dy/d,nz=dz/d;
-        px=web.x+nx*web.len+(px-web.x-dx); pz=web.z+nz*web.len+(pz-web.z-dz);
-        camH=web.y+ny*web.len;
-        const vr=velX*nx+velH*ny+velZ*nz;
-        if(vr>0){velX-=vr*nx;velH-=vr*ny;velZ-=vr*nz}
-      }
-      web.len=Math.max(6,web.len-1.6*dt);                // reel in, but never to a stall
-    }
   }else{                                                 // free flight
-    const sp=(7+camH*0.8)*run;
-    const k=1-Math.exp(-dt*7);
+    const sp=(3+camH*0.22)*run;
+    const k=1-Math.exp(-dt*10);
     velX+=((fx/l)*sp-velX)*k; velZ+=((fz/l)*sp-velZ)*k;
-    velH+=(fh*(4+camH*0.35)*run-velH)*k;
+    velH+=(fh*(5+camH*0.4)*run-velH)*k;
   }
-  const feet=camH-EYE;                                   // solid world: slide along walls
-  const nx2=px+velX*dt; if(hitsWall(nx2,pz,feet)){velX=(web||airborne)?velX*-0.15:0}else px=nx2;
-  const nz3=pz+velZ*dt; if(hitsWall(px,nz3,feet)){velZ=(web||airborne)?velZ*-0.15:0}else pz=nz3;
+  /* swept horizontal move: substepped, so speed can never skip through geometry */
+  const feet=camH-EYE;
+  const nSub=Math.max(1,Math.ceil(Math.hypot(velX,velZ)*dt/0.12));
+  let mvx=velX*dt/nSub, mvz=velZ*dt/nSub;
+  for(let k=0;k<nSub;k++){
+    if(mvx){if(hitsWall(px+mvx,pz,feet)){velX*=-0.25;mvx*=-0.25}else px+=mvx}
+    if(mvz){if(hitsWall(px,pz+mvz,feet)){velZ*=-0.25;mvz*=-0.25}else pz+=mvz}}
+  const prevH=camH;
   camH+=velH*dt;
-  const g2=groundAt(px,pz);
-  if(camH<g2+EYE){camH=g2+EYE;                           // land on whatever is below
+  if(velH>0&&prevH<=DECKB+0.001&&camH>DECKB)              // head bonks the highway slab
+    for(let k=0;k<5;k++)if(deckAt(px+CKX[k],pz+CKZ[k])){camH=DECKB;velH=0;break}
+  const g2=groundAt(px,pz,feet);                          // support judged before the drop
+  if(camH<g2+EYE){camH=g2+EYE;                            // land on whatever is below
     if(velH<0)velH=0;
-    if(airborne&&!web){airborne=false;web=null}}
-  if(web||walkMode)airborne=camH>groundAt(px,pz)+EYE+0.02||!!web;
-  if(camH>18){camH=18;velH=Math.min(velH,0)}
-  px=((px%G)+G)%G;pz=((pz%G)+G)%G;                       // endless city: wrap around
+    if(airborne)airborne=false}
+  if(walkMode)airborne=camH>groundAt(px,pz,camH-EYE)+EYE+0.02;
+  camH=CRUISE;velH=0;                                   // the craft holds its flight level
+  px=((px%G)+G)%G;pz=((pz%G)+G)%G;                        // endless city: wrap around
+  if(typeof CAPS!=='undefined')for(const g of CAPS){      // dragons are solid flesh
+    if(Math.abs(g.alt-camH)>0.7)continue;              // only its actual body height
+    let rxc=px-g.x,rzc=pz-g.z;
+    rxc-=G*Math.round(rxc/G);rzc-=G*Math.round(rzc/G);
+    const axc=Math.cos(g.a),azc=Math.sin(g.a);
+    let al=rxc*axc+rzc*azc;al=Math.max(-g.len/2,Math.min(g.len/2,al));
+    const ddx=rxc-axc*al,ddz=rzc-azc*al, d=Math.hypot(ddx,ddz);
+    if(d<0.55){                                          // hug the visible hull
+      const nx=d>0.001?ddx/d:1, nz=d>0.001?ddz/d:0;
+      px=((g.x+axc*al+nx*0.55)%G+G)%G;pz=((g.z+azc*al+nz*0.55)%G+G)%G;
+      const vr=velX*nx+velZ*nz;
+      if(vr<0){velX-=vr*nx;velZ-=vr*nz}                    // slide off the flank
+    }
+  }
+  /* never leave anyone stuck: clipped, dunked, or walled into a courtyard */
+  if(camH>DECKB+0.001&&camH-EYE<DECK-STEP&&deckAt(px,pz)){  // entombed in the slab: pop on top
+    camH=DECK+EYE;velH=Math.max(0,velH)}
+  const st=solidTop(px,pz);
+  if(camH<st-0.02){clipN++;rescue('yanked back to daylight');return}
+  const supN=groundAt(px,pz,camH-EYE), gnd=camH<=supN+EYE+0.03, ci=(pz|0)*G+(px|0);
+  if(gnd&&st>-0.4&&!TRAP[ci]){lastSolid.x=px;lastSolid.z=pz;lastSolid.h=camH}
+  if(st<-0.4&&(camH-EYE<((walkMode||airborne)?0:-0.2))){dunkT+=dt;   // in the channel = dunked
+    if(dunkT>0.7)rescue('SPLASH \u2014 fished out of the river')}
+  else dunkT=0;
+  if(walkMode&&gnd&&TRAP[ci]){trapT+=dt;
+    if(trapT>2.5)rescue('a service door lets you back onto the street')}
+  else trapT=0;
 }
 
 /* ---------- frame ---------- */
-let last=performance.now(),lastTB=-1;
-const popEl=document.getElementById('pop');
+let last=performance.now(),lastTB=-1,lastSkyH=-1;
 function frame(now){
+  rafId=0;                                               // this one has been spent
+  if(paused)return;                                      // parked until the host wakes us
+  fitCanvas(now);
+  const dprW=Math.min(2,window.devicePixelRatio||1);     // sub-pixel scroll is in device px
   const dt=Math.min(0.05,(now-last)/1000);last=now;NOW=now;TB=(now/500)|0;
   move(dt);
-  const nh=Math.round(H*(0.30+pitch));   // pitch shears the horizon: down at feet, up at sky
-  if(nh!==HOR){HOR=nh;buildSky()}
+  const panK=RMOTION?0:1;                                // reduced motion: no idle drift
+  let dA=ang+(cursX-0.5)*0.14*panK-angV;dA=Math.atan2(Math.sin(dA),Math.cos(dA));
+  angV+=dA*Math.min(1,dt*11);
+  pitchV+=(pitch+(0.5-cursY)*0.07*panK-pitchV)*Math.min(1,dt*11);
+  const nh=H*(0.30+pitchV);
+  const colA=tanH/(W/2);                  // one glyph column, in view-angle terms
+  const angR=Math.round(angV/colA)*colA;  // the render camera snaps to the cell grid...
+  {const hi=Math.round(nh);
+   if(hi!==HOR){HOR=hi;if(hi!==lastSkyH){lastSkyH=hi;buildSky()}}
+   const txPx=-((angV-angR)/colA)*CW/dprW, tyPx=(nh-hi)*LH/dprW;
+   cv.style.transform=`translate(${txPx.toFixed(2)}px,${tyPx.toFixed(2)}px)`}  // ...and the
+  // leftover fraction slides the whole canvas: pans glide instead of stepping
   for(const c of cars){                                  // traffic holds at red lights
     const ahead=c.t+c.dir*0.55;
     const ii=c.ax?(ahead|0):c.i0, jj=c.ax?c.i0:(ahead|0);
@@ -746,18 +1139,34 @@ function frame(now){
     c.t+=c.dir*c.sp*dt;if(c.t>G-1)c.t=1;if(c.t<1)c.t=G-1}
   for(const p of planes){p.x+=Math.cos(p.a)*p.sp*dt;p.z+=Math.sin(p.a)*p.sp*dt;
     p.x=((p.x%G)+G)%G;p.z=((p.z%G)+G)%G}
+  for(const g of CAPS){                                  // they steer around the towers
+    g.alt=g.alt0+Math.sin(NOW*0.0004+g.ph*7)*0.7;          // slow rise and fall
+    const aMin=g.alt0-0.75;                                // clearance at the breathing low
+    if(!capClear(g.x,g.z,g.a,g.len,aMin)){                 // blocked: climb, never vanish
+      if(g.alt0<10.5)g.alt0+=2.4*dt;
+      else capSpawn(g);
+    }else if(g.alt0>(g.alt00||7))g.alt0=Math.max(g.alt00,g.alt0-0.12*dt);
+    const cs=Math.cos(g.a),sn=Math.sin(g.a);
+    if(!capClear(g.x+cs*1.6,g.z+sn*1.6,g.a,g.len,aMin)){
+      if(!g.ta||NOW-(g.turnT||0)>900){                     // commit to a fresh heading
+        g.turnT=NOW;g.ta=g.a+Math.PI;
+        for(const dA of [0.7,-0.7,1.3,-1.3,2.0,-2.0]){
+          const na=g.a+dA;
+          if(capClear(g.x+Math.cos(na)*2.4,g.z+Math.sin(na)*2.4,na,g.len,aMin)){g.ta=na;break}}
+      }
+      let dA2=g.ta-g.a;dA2=Math.atan2(Math.sin(dA2),Math.cos(dA2));
+      g.a+=Math.sign(dA2)*Math.min(Math.abs(dA2),1.6*dt);
+    }else{
+      g.ta=0;
+      const nx=g.x+cs*g.sp*dt,nz=g.z+sn*g.sp*dt;
+      if(capClear(nx,nz,g.a,g.len,aMin)){g.x=nx;g.z=nz}
+      else g.a+=0.9*dt;
+    }
+    g.x=((g.x%G)+G)%G;g.z=((g.z%G)+G)%G}
   for(const b of boats){b.t+=b.dir*b.sp*dt;if(b.t>G-8)b.t=8;if(b.t<8)b.t=G-8}
-  for(const p of PEDS){                                  // people keep to the sidewalks
-    if(hash3((p.x*50)|0,(p.z*50)|0,TB)<0.02)p.a+=(hash2((p.x*99)|0,TB)-0.5)*2;
-    const nx=p.x+Math.cos(p.a)*p.sp*dt, nz=p.z+Math.sin(p.a)*p.sp*dt;
-    if(walkable(nx,nz)){p.x=nx;p.z=nz}
-    else p.a+=2.1;
-  }
-  if(TB!==lastTB){lastTB=TB;                             // live population counter
-    popEl.textContent='POP. '+(POPBASE+((NOW/500|0)*7)%97).toLocaleString()}
-  CH.fill(' ');CO.fill(0);
+  CH.fill(' ');CO.fill(0);DEP.fill(1e9);BRT.fill(0);GLOWQ.length=0;
   for(const b of FBGB)b.length=0;
-  const dirX=Math.cos(ang),dirZ=Math.sin(ang),plX=-dirZ*tanH,plZ=dirX*tanH;
+  const dirX=Math.cos(angR),dirZ=Math.sin(angR),plX=-dirZ*tanH,plZ=dirX*tanH;
   const invDet=1/(plX*dirZ-dirX*plZ);
   for(const p of planes){                     // planes first: city occludes them
     let rx=p.x-px,rz=p.z-pz;
@@ -766,6 +1175,7 @@ function frame(now){
     if(ty<3)continue;
     const sxc=((W/2)*(1+t1/ty))|0;if(sxc<5||sxc>=W-5)continue;
     const r=(HOR+(camH-p.alt)*pV/ty)|0;
+    PD=ty;
     if(p.heli){                                       // helicopter: rotor + body + tail light
       put(sxc,r-1,((NOW/150)|0)%2?'+':'x',2,1);
       put(sxc,r,'o',3,1);
@@ -778,9 +1188,23 @@ function frame(now){
     put(sxc-w2-1,r,blink?'*':'.',6,1);                // red nav light
     put(sxc+w2+1,r,blink?'.':'*',blink?3:26,1);       // green nav light
   }
+  /* third person: the craft is at px/pz; the camera hangs off a boom behind it */
+  const shipX=px,shipZ=pz,shipH=camH;
+  {let tB=3.6;                                            // pull in only if the eye itself
+    while(tB>0.9&&solidTop(shipX-dirX*tB,shipZ-dirZ*tB)>shipH+1.2)tB-=0.15;   // sits in a wall
+    BOOM+=(tB-BOOM)*Math.min(1,dt*(tB<BOOM?14:4.5));
+    GHOST.clear();
+    for(let t=0;t<=BOOM+0.4;t+=0.3){
+      const gx=shipX-dirX*t,gz=shipZ-dirZ*t;
+      const gi=((Math.floor(gx)%G)+G)%G,gj=((Math.floor(gz)%G)+G)%G,gc=gj*G+gi;
+      const gb=BID[gc];
+      if(HGT[gc]*STY>shipH-0.3&&gb!==0&&gb!==-1)GHOST.add(gb);
+    }
+    px=shipX-dirX*BOOM;pz=shipZ-dirZ*BOOM;camH=shipH+1.35}
   for(let x=0;x<W;x++)renderColumn(x,dirX,dirZ,plX,plZ);
   {                                           // distant planets, fixed in the sky
     const drawPlanet=(A,EL,R,bodyK,rimK,ring)=>{
+      PD=900;
       let da=A-ang;da=Math.atan2(Math.sin(da),Math.cos(da));
       if(Math.abs(da)>FOV*0.95)return;
       const colC=(0.5+da/FOV)*W, rowC=HOR-EL;
@@ -802,6 +1226,160 @@ function frame(now){
     drawPlanet(-2.4,(H*0.42)|0,4,3,35,false);  // far moon
     drawPlanet(1.35,(H*0.7)|0,2,19,18,false);  // tiny white world
   }
+  PB=1;
+  for(const g of CAPS){                       // sky monsters: world-marched, never vanish
+    const hx=Math.cos(g.a),hz=Math.sin(g.a);
+    let rcx=g.x-px,rcz=g.z-pz;
+    rcx-=G*Math.round(rcx/G);rcz-=G*Math.round(rcz/G);
+    if(rcx*rcx+rcz*rcz>9216)continue;
+    const flap=Math.sin(NOW*0.005+g.ph*3);
+    // laser bite: the hide FLASHES red-normal-red, never holds red — 180ms
+    // segments keep the strobe under the 3Hz photosensitivity line
+    const hs=NOW-(g.hitT||0);
+    const hurt=hs<650&&((hs/180|0)%2)===0;
+    const NSEG=Math.max(16,(g.len*5)|0);
+    let pcS=null, jawC=-1,jawR=0,jawTy=1, drew=false;
+    for(let ks=0;ks<=NSEG;ks++){
+      const uu=ks/NSEG;
+      const ddx=rcx+hx*g.len*(uu-0.5), ddz=rcz+hz*g.len*(uu-0.5);
+      const ty=invDet*(-plZ*ddx+plX*ddz);
+      if(ty<0.35||ty>95){pcS=null;continue}
+      const t1=invDet*(dirZ*ddx-dirX*ddz);
+      const c=(W/2)*(1+t1/ty), r=HOR+(camH-g.alt)*pV/ty;
+      if(pcS){
+        const c0=Math.round(pcS.c), c1=Math.round(c), stp2=c1>=c0?1:-1;
+        for(let cc=c0;cc!==c1+stp2;cc+=stp2){
+          if(cc<0||cc>=W)continue;
+          const f=c1===c0?0:(cc-c0)/(c1-c0);
+          const tyk=1/((1-f)/pcS.ty+f/ty);
+          const uuk=pcS.uu+(uu-pcS.uu)*f;
+          const su3=pV/tyk;
+          const rrB=Math.round(pcS.r+(r-pcS.r)*f+Math.sin(uuk*7+NOW*0.0032+g.ph)*0.35*su3);
+          PD=tyk;
+          const fg=fogOf(Math.min(tyk,MAXD-1));
+          const headU=uuk>0.88, tailU=uuk<0.1;
+          let th=Math.max(2,Math.min(16,(0.85*su3)|0));
+          if(headU)th=Math.min(20,(th*1.5)|0);             // the skull
+          if(tailU)th=Math.max(1,th>>1);                   // whip tail
+          const tt=Math.max(1,Math.ceil(th*Math.sqrt(Math.max(0,1-(2*uuk-1)*(2*uuk-1)))));
+          const suC=(W/2)/(tanH*tyk);
+          const wCols=Math.max(1,Math.min(14,(0.45*suC)|0));   // the body is a tube
+          const strideQ=Math.max(1,Math.abs(c1-c0));           // full circle only when end-on
+          for(let dxq=-wCols;dxq<=wCols;dxq+=strideQ){
+            const ccq=cc+dxq;if(ccq<0||ccq>=W)continue;
+            const lat=Math.sqrt(Math.max(0.05,1-(dxq*dxq)/((wCols+0.001)*(wCols+0.001))));
+            const ttq=Math.max(1,Math.ceil(tt*lat));
+            for(let dy=0;dy<ttq;dy++){
+              if(rrB-dy>=0&&rrB-dy<H)FBGB[223].push(ccq,rrB-dy,rrB-dy);   // solid mass
+              const topR=dy===ttq-1;
+              const sc2=hash3(ccq,dy,7);
+              const hulc=topR?'=':(ccq%5===0&&dy===(ttq>>1))?'o':(sc2<0.3?'%':'#');
+              const kd=hulc==='o'?(((NOW/500+ccq)|0)%2?14:5)                 // bioluminescence
+                      :topR?18:dy===0?29
+                      :dxq<-wCols*0.3?29:dxq>wCols*0.35?18                   // barrel shading
+                      :dy<ttq*0.3?19:(sc2<0.12?18:19);                       // pale hide
+              put(ccq,rrB-dy,hulc,hurt?6:kd,fg);
+            }
+          }
+          if(uuk>0.93&&uuk<0.96)put(cc,rrB-(tt>>1),'@',14,fg);   // the eye
+          if(uuk>0.965){put(cc,rrB+1,'v',5,fg);                  // the jaw
+            if(jawC<0){jawC=cc;jawR=rrB+2;jawTy=tyk}}
+          const wband=(uuk>0.3&&uuk<0.44)||(uuk>0.52&&uuk<0.66); // flapping wings
+          if(wband&&(cc&1)===0){
+            const wl=Math.min(13,Math.max(2,((1.1+0.9*flap)*su3*0.35)|0));
+            const up=flap>-0.2;
+            for(let wr=1;wr<=wl;wr++){
+              const wy=up?rrB-tt-wr:rrB+wr;
+              const wx=cc+(uuk<0.5?-1:1)*(wr>>1);
+              if(wx>=0&&wx<W&&wy>=0&&wy<H)FBGB[223].push(wx,wy,wy);
+              put(wx,wy,wr===wl?'~':up?(uuk<0.5?'\\':'/'):(uuk<0.5?'/':'\\'),hurt?6:wr>wl*0.6?15:19,fg);
+            }
+          }
+          if(uuk>0.62&&uuk<0.7&&th>=2){                          // dorsal fin
+            put(cc,rrB-tt,'/',hurt?6:15,fg);
+            put(cc,rrB-tt-1,uuk>0.66?'\\':'/',hurt?6:15,fg);
+          }
+          drew=true;
+        }
+      }
+      pcS={c,r,ty,uu};
+    }
+    if(!drew)continue;
+    {                                          // health bar, always on
+      const ty=invDet*(-plZ*rcx+plX*rcz);
+      if(ty>1){
+        const t1=invDet*(dirZ*rcx-dirX*rcz);
+        const mc=Math.round((W/2)*(1+t1/ty));
+        const mr=Math.round(HOR+(camH-g.alt)*pV/ty-1.3*pV/ty);
+        PD=Math.max(0.3,ty-0.4);
+        const wBar=22, fill=Math.max(0,Math.round(g.hp/60*wBar));
+        put(mc-(wBar>>1)-1,mr,'[',19,0);put(mc+(wBar>>1),mr,']',19,0);
+        for(let q=0;q<wBar;q++)put(mc-(wBar>>1)+q,mr,q<fill?'#':'-',q<fill?6:1,0);
+      }
+    }
+    const cycN=NOW/4200+g.ph, cyc=cycN%1;      // fire from the drawn jaw itself
+    if(cyc<0.55&&jawC>=0){
+      const seed=Math.floor(cycN);
+      const thR=hash2(seed,(g.ph*97)|0)*6.283, r2=2+hash2(seed*3,7)*4.5;
+      const mxw=g.x+hx*g.len*0.47, mzw=g.z+hz*g.len*0.47;
+      const txw=mxw+Math.cos(thR)*r2, tzw=mzw+Math.sin(thR)*r2;
+      const gH=Math.max(0,solidTop(txw,tzw));
+      const tdx=rcx+hx*g.len*0.47+Math.cos(thR)*r2, tdz=rcz+hz*g.len*0.47+Math.sin(thR)*r2;
+      const tyT=invDet*(-plZ*tdx+plX*tdz);
+      if(tyT>0.5&&tyT<95){
+        const t1T=invDet*(dirZ*tdx-dirX*tdz);
+        const Tc=Math.round((W/2)*(1+t1T/tyT)), Tr=Math.round(HOR+(camH-gH)*pV/tyT);
+        const stp=Math.max(Math.abs(Tc-jawC),Math.abs(Tr-jawR),1);
+        for(let k3=0;k3<=stp;k3++){
+          const u=k3/stp;
+          const cc=Math.round(jawC+(Tc-jawC)*u), rr=Math.round(jawR+(Tr-jawR)*u);
+          PD=1/((1-u)/jawTy+u/tyT);
+          for(let dxb=-1;dxb<=1;dxb++){
+            const fz2=hash3(cc+dxb,rr,(NOW/60)|0);
+            put(cc+dxb,rr,Math.abs(dxb)<1?'#':fz2<0.5?'|':'!',Math.abs(dxb)<1?(fz2<0.8?16:5):16,0);
+          }
+        }
+        PD=Math.max(0.3,tyT-0.3);
+        for(let dx2=-4;dx2<=4;dx2++)for(let dy2=0;dy2<=1;dy2++)
+          if(hash3(dx2,dy2+((NOW/70)|0),9)<0.75)
+            put(Tc+dx2,Tr-dy2,Math.abs(dx2)<2?'#':'*',dx2===0?5:Math.abs(dx2)<3?16:17,0);
+        if(NOW-(g.lastB||0)>210){g.lastB=NOW;               // its fire leaves craters
+          BOOMS.push({x:txw,z:tzw,h:gH,t0:NOW,sN:1.3});
+          if(BOOMS.length>40)BOOMS.shift();}
+      }
+    }
+  }
+  for(let i2=BOOMS.length-1;i2>=0;i2--){        // giant explosions where the laser lands
+    PB=1;
+    const bm=BOOMS[i2], age=(NOW-bm.t0)/1050;
+    if(age>1){BOOMS.splice(i2,1);continue}
+    if(age<0)continue;                          // scheduled down the chain
+    let rx=bm.x-px,rz=bm.z-pz;
+    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
+    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.4)continue;
+    const t1=invDet*(dirZ*rx-dirX*rz);
+    const cc=Math.round((W/2)*(1+t1/ty)), rr=Math.round(HOR+(camH-bm.h)*pV/ty);
+    if(cc<-70||cc>W+70)continue;
+    PD=Math.max(0.3,ty-0.3);
+    const su2=(W/2)/(tanH*ty), att=Math.min(1,12/ty);   // a constant-size fireball towers over
+    const Rw=(0.4+Math.min(age,0.6)*1.9)*(bm.sN||1)*att; // the far skyline — shrink it with range
+    const Rr=Math.min(42,Rw*pV/ty), Rc2=Math.min(86,Rw*su2);
+    for(let dy=-Rr|0;dy<=Rr;dy++)for(let dx=(-Rc2)|0;dx<=Rc2;dx++){
+      const rn=Math.hypot(dx/Rc2,dy/Rr);
+      if(rn>1)continue;
+      const n2=hash3(dx*3,dy*5,(NOW/(RMOTION?900:140))|0);
+      if(n2>0.92-rn*0.5-age*0.8)continue;       // dissolves gradually into embers
+      const hot=rn<0.35-age*0.25;
+      const chE=hot?'#':rn<0.6?(n2<0.5?'#':'o'):(n2<0.5?'*':'.');
+      const kdE=age>0.72?(n2<0.5?22:21)                    // late embers, dimming out
+               :hot?5:rn<0.5?(n2<0.6?12:20):(age<0.5?6:22);
+      put(cc+dx,rr+dy,chE,kdE,0);
+      // the fireball's core joins the bloom pass — near blasts only (far
+      // skyline hits stay matte), half the hot cells is plenty of halo
+      if(hot&&ty<14&&((dx^dy)&1)===0)GLOWQ.push(cc+dx,rr+dy,kdE*4);
+    }
+  }
+  PB=0;                                       // traffic and trees are city, not hero
   for(const c of cars){
     const off=laneOff(c);
     const wx=c.ax?c.t:c.i0+off, wz=c.ax?c.i0+off:c.t;
@@ -811,7 +1389,8 @@ function frame(now){
     rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
     const t1=invDet*(dirZ*rx-dirX*rz), ty=invDet*(-plZ*rx+plX*rz);
     if(ty<1.5)continue;
-    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<0||sxc>=W||ty>GMAX[sxc]+1.5)continue;
+    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<0||sxc>=W)continue;
+    PD=ty;
     const toward=((c.ax?dirX:dirZ)*c.dir)<0;
     const r=(HOR+(camH-(c.ty===3?0.56:0.06))*pV/ty)|0;   // highway cars ride the deck
     if(c.bus){const fg=fogOf(ty);
@@ -825,7 +1404,8 @@ function frame(now){
     const t1=invDet*(dirZ*rx-dirX*rz), ty=invDet*(-plZ*rx+plX*rz);
     if(ty<2)continue;
     const sxc=((W/2)*(1+t1/ty))|0;
-    if(sxc<1||sxc>=W-1||ty>GMAX[sxc]+1.5)continue;
+    if(sxc<1||sxc>=W-1)continue;
+    PD=ty;
     const r=(HOR+(camH+0.42)*pV/ty)|0, fg=fogOf(ty);   // boats float on the lowered water
     put(sxc-2,r,'<',3,fg);put(sxc-1,r,'=',3,fg);put(sxc,r,'=',3,fg);put(sxc+1,r,'>',3,fg);
     put(sxc,r-1,'o',5,fg);                                 // cabin light
@@ -835,13 +1415,14 @@ function frame(now){
   for(const t of TREES){                      // small canopy-on-trunk tree sprites
     let rx=t.x-px,rz=t.z-pz;
     rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
-    const ty=invDet*(-plZ*rx+plX*rz);if(ty<1.2||ty>38)continue;
+    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.3||ty>38)continue;
     const t1=invDet*(dirZ*rx-dirX*rz);
     const sxc=((W/2)*(1+t1/ty))|0;if(sxc<-14||sxc>W+14)continue;
     const rG=HOR+camH*pV/ty, rT=HOR+(camH-t.h)*pV/ty;
-    const hw3=Math.min(14,Math.max(1,((0.30*(W/2))/(tanH*ty))|0)), fg=fogOf(ty);
+    const hw3=Math.min(48,Math.max(1,((0.30*(W/2))/(tanH*ty))|0)), fg=fogOf(ty);
+    PD=ty;
     for(let dx=-hw3;dx<=hw3;dx++){
-      const cx2=sxc+dx;if(cx2<0||cx2>=W||ty>GMAX[cx2]+1.2)continue;
+      const cx2=sxc+dx;if(cx2<0||cx2>=W)continue;
       for(let r=Math.max(0,rT|0);r<=Math.min(H-1,rG|0);r++){
         const fr=(r-rT)/(rG-rT+0.001), ex=dx/(hw3+0.5);
         if(fr>0.78){if(dx===0)put(cx2,r,'|',1,fg);continue}   // trunk
@@ -856,9 +1437,10 @@ function frame(now){
   for(const f of FURN){                       // 3d-scaled furniture sprites
     let rx=f.x-px,rz=f.z-pz;
     rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
-    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.8||ty>22)continue;
+    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.3||ty>22)continue;
     const t1=invDet*(dirZ*rx-dirX*rz);
-    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<1||sxc>=W-2||ty>GMAX[sxc]+1)continue;
+    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<1||sxc>=W-2)continue;
+    PD=ty;
     const rG2=Math.min(H-1,(HOR+camH*pV/ty)|0), fg=fogOf(ty);
     const wCols=Math.max(0,Math.min(2,(0.05*(W/2)/(tanH*ty))|0));  // extra girth up close
     if(f.k===0){                              // lamppost: pole, arm, warm head, halo
@@ -872,6 +1454,25 @@ function frame(now){
       for(let r=rTp+1;r<=rG2;r++)put(sxc,r,'|',1,fg);
       put(sxc,rTp,'#',f.hu,fg);put(sxc+1,rTp,'#',f.hu+1,fg);
       if(wCols>0&&rTp>0){put(sxc,rTp-1,'#',f.hu+1,fg);put(sxc+1,rTp-1,'#',f.hu,fg)}
+    }else if(f.k===4){                        // stoplight: pole + twin heads, car-synced
+      const cyc=(NOW/3000+hash2(f.ii,f.jj))%1;
+      const kx=(cyc>=0.5&&cyc<0.95)?8:(cyc>=0.95?20:6);   // x-axis traffic
+      const kz=(cyc<0.45)?8:(cyc<0.5?20:6);               // z-axis traffic
+      const rTp=Math.max(0,(HOR+(camH-0.34)*pV/ty)|0);
+      for(let r=rTp+2;r<=rG2;r++)put(sxc,r,'|',3,fg);
+      put(sxc,rTp,'=',1,fg);
+      put(sxc,rTp+1,'o',kx,fg);put(sxc+1,rTp+1,'o',kz,fg);
+    }else if(f.k===5){                        // shop sign hung out over the street
+      const yT=f.hgt+0.09*f.ln;
+      const rT5=Math.max(0,(HOR+(camH-yT)*pV/ty)|0);
+      const rB5=Math.min(H-1,(HOR+(camH-f.hgt)*pV/ty)|0);
+      const flick=hash3((f.x*50)|0,(f.z*50)|0,(NOW/700)|0)<0.08;
+      if(rT5<=rB5)put(sxc,rT5,'+',3,fg);
+      for(let r=rT5+1;r<=rB5;r++){
+        const gy=hash3((f.x*50)|0,r*3,1);
+        put(sxc,r,gy<0.6?'#':'o',flick?f.hu+1:f.hu,fg);
+        if(wCols>0)put(sxc+1,r,gy<0.5?'o':':',f.hu+1,fg);
+      }
     }else if(f.k===2){                        // garbage can: lid + body
       const rS=Math.max(0,(HOR+(camH-0.05)*pV/ty)|0);
       put(sxc,rS,'=',1,fg);
@@ -884,17 +1485,6 @@ function frame(now){
         if(rS+1<=rG2)put(sxc+d2,rS+1,(d2===0||d2===1+wCols)?'|':' ',0,fg);
       }
     }
-  }
-  for(const p of PEDS){                       // stick-figure citizens
-    let rx=p.x-px,rz=p.z-pz;
-    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
-    if(rx*rx+rz*rz>150)continue;
-    const ty=invDet*(-plZ*rx+plX*rz);if(ty<0.7||ty>12)continue;
-    const t1=invDet*(dirZ*rx-dirX*rz);
-    const sxc=((W/2)*(1+t1/ty))|0;if(sxc<0||sxc>=W||ty>GMAX[sxc]+0.8)continue;
-    const rF=Math.min(H-1,(HOR+camH*pV/ty)|0), rH=Math.max(0,(HOR+(camH-0.09)*pV/ty)|0);
-    const fg=fogOf(ty), mid=(rH+rF)>>1;
-    for(let r=rH;r<=rF;r++)put(sxc,r,r===rH?'o':r===mid?'+':'|',r===rH?3:1,fg);
   }
   {                                             // the reactor's giant rotating searchlight
     const th=NOW*0.00045, hTop=78*STY;
@@ -910,6 +1500,7 @@ function frame(now){
       const sxc=Math.round((W/2)*(1+t1/ty));
       if(sxc<-60||sxc>W+60){pc=-9999;continue}
       const rC=Math.round(HOR+(camH-wy)*pV/ty);
+      PD=Math.min(ty,890);
       const fg=fogOf(Math.min(ty,MAXD-1));
       const wdt=1+Math.max(1,(3-2.4*s)|0);      // thick at the source, tapering out
       if(pc>-9000){
@@ -929,6 +1520,140 @@ function frame(now){
       pc=sxc;pr=rC;
     }
   }
+  PB=1;
+  {                                           // the craft itself
+    const CRAFT=[
+      "_/@@@\\_",
+      "|=@@@=|",
+      "      __/=========\\__      ",
+      "   __/##\\_____|=========|_____/##\\__   ",
+      " _/######\\____|=========|____/######\\_ ",
+      "/#########\\===|===###===|===/#########\\",
+      "|##########\\===[#######]===/##########|",
+      "<###########\\==[#######]==/###########>",
+      " `\\##########\\==#######==/##########/' ",
+      "    `\\#######|[o#o]=[o#o]|#######/'    ",
+      "       `\\####|[o#o]=[o#o]|####/'       ",
+      "          `\\##=\\=======/=##/'          ",
+      "            `\\==\\=====/==/'            "];
+    let da=ang-prevAng;da=Math.atan2(Math.sin(da),Math.cos(da));prevAng=ang;
+    bankS+=(Math.min(0.6,Math.max(-0.6,da/Math.max(0.008,dt)*0.25))-bankS)*Math.min(1,dt*6);
+    const bob=Math.round(Math.sin(NOW*0.0012)*1.2);
+    const spd=Math.hypot(velX,velZ);
+    const rowC=(H*0.68)|0;                             // pinned well below center
+    const colC=W>>1, fgS=0;
+    PD=BOOM-0.3;
+    const boost=!!keys['shift'];                       // blasters roar even at a standstill
+    const shipMask=new Set();                          // laser never paints through the hull
+    for(let iy=0;iy<CRAFT.length;iy++){
+      const ln=CRAFT[iy], sh=Math.round(bankS*(iy-(CRAFT.length>>1))*-1.2);
+      const rr=rowC-CRAFT.length+3+iy+bob;
+      const c0=colC-(ln.length>>1)+sh;
+      let lastIx=-1;for(let q=ln.length-1;q>=0;q--)if(ln[q]!==' '){lastIx=q;break}
+      for(let ixh=0;ixh<ln.length;ixh++){
+        const chh=ln[ixh];if(chh===' ')continue;
+        const rel=ixh-(ln.length>>1);
+        const cxa=c0+ixh;
+        if(cxa>=0&&cxa<W&&rr>=0&&rr<H){
+          FBGB[223].push(cxa,rr,rr);   // solid backing per glyph
+          shipMask.add(rr*W+cxa);
+        }
+        let ch2=chh,kd=23;
+        if(chh==='@')kd=hash3(ixh,iy,(NOW/900)|0)<0.1?5:4;         // canopy glint
+        else if(chh==='#')kd=rel<=-4?23:rel<0?22:6;                // shadow side -> lit side
+        else if(chh==='=')kd=rel<0?23:22;
+        else if(chh==='o'){if(boost){ch2='#';kd=12}else{kd=20}}    // engine bells
+        else if(chh==='<'){const on=((NOW/650)|0)%2;ch2=on?'*':'<';kd=on?6:23}
+        else if(chh==='>'){const on=((NOW/650)|0)%2;ch2=on?'>':'*';kd=on?23:8}
+        if(ixh===lastIx&&iy>=4&&kd===23)kd=20;                     // amber rim light
+        put(cxa,rr,ch2,kd,fgS);                                    // the hull stays matte — only fire blooms
+      }
+    }
+    const flLen=boost?10:4+Math.min(3,(spd/2)|0);         // hearty idle burn, roaring boost
+    const shJet=Math.round(bankS*((CRAFT.length-2)-(CRAFT.length>>1))*-1.2);
+    for(const jo of [-3,3])for(let k2=1;k2<=flLen;k2++){
+      const rr2=rowC+2+k2+bob;
+      const jx=colC+jo+shJet;
+      const wSp=boost?Math.max(0,2-(k2>>2)):Math.max(0,1-(k2>>2));
+      for(let dxj=-wSp;dxj<=wSp;dxj++){
+        const f3=hash3(jx+dxj,k2*3+((NOW/60)|0),7);
+        if(f3<(boost?0.92:0.88)){
+          const ch3=k2<3?'#':k2<6?'w':f3<0.5?'v':'~';
+          const kd3=boost&&k2<2?(f3<0.5?5:12):k2<(boost?4:2)?20:22;
+          put(jx+dxj,rr2,ch3,kd3,0);GLOWQ.push(jx+dxj,rr2,kd3*4)}  // engines burn into the halo
+      }
+    }
+    if(keys['f']){                                        // nose laser: neon violet
+      const hx2=Math.cos(ang),hz2=Math.sin(ang);          // fired along the ship's heading
+      let hitT=40,capHit=null;
+      for(let t2=1.2;t2<40;t2+=0.35){
+        const bxs=shipX+hx2*t2,bzs=shipZ+hz2*t2;
+        for(const g of CAPS){                             // dragons are fair game
+          if(Math.abs(g.alt-shipH)>3)continue;
+          let rxc=bxs-g.x,rzc=bzs-g.z;
+          rxc-=G*Math.round(rxc/G);rzc-=G*Math.round(rzc/G);
+          const axc=Math.cos(g.a),azc=Math.sin(g.a);
+          let al=rxc*axc+rzc*azc;al=Math.max(-g.len/2,Math.min(g.len/2,al));
+          const ddx=rxc-axc*al,ddz=rzc-azc*al;
+          if(ddx*ddx+ddz*ddz<0.85){capHit=g;hitT=t2;break}
+        }
+        if(capHit)break;
+        if(solidTop(bxs,bzs)>shipH-0.06){hitT=t2;break}
+      }
+      if(hitT<40&&NOW-lastBoomT>45){                      // seed fireballs continuously
+        lastBoomT=NOW;
+        BOOMS.push({x:shipX+hx2*hitT,z:shipZ+hz2*hitT,h:capHit?capHit.alt:shipH,t0:NOW,sN:0.55});
+        if(BOOMS.length>40)BOOMS.shift();
+        // only re-arm the flash once the last window played out — resetting
+        // every hit pinned hs≈0 and read as constant red under a held beam
+        if(capHit&&!(NOW-(capHit.hitT||0)<650))capHit.hitT=NOW;
+        if(capHit&&--capHit.hp<=0){                       // the kill: fire down the length
+          for(let q=0;q<10;q++)
+            BOOMS.push({x:capHit.x+Math.cos(capHit.a)*capHit.len*(q/9-0.5),
+                        z:capHit.z+Math.sin(capHit.a)*capHit.len*(q/9-0.5),
+                        h:capHit.alt,t0:NOW+q*60,sN:1.6});
+          for(let q=0;q<5;q++)
+            BOOMS.push({x:capHit.x,z:capHit.z,h:capHit.alt+(q-2)*0.3,t0:NOW+320+q*90,sN:2.4});
+          BOOMS.push({x:capHit.x,z:capHit.z,h:capHit.alt,t0:NOW+680,sN:3.2});
+          capSpawn(capHit,capHit.x,capHit.z);capHit.hp=60;
+        }
+      }
+      const bx=shipX+hx2*hitT,bz=shipZ+hz2*hitT;
+      let rxE=bx-px,rzE=bz-pz;
+      rxE-=G*Math.round(rxE/G);rzE-=G*Math.round(rzE/G);
+      const tyE=invDet*(-plZ*rxE+plX*rzE);
+      if(tyE>0.4){
+        const t1E=invDet*(dirZ*rxE-dirX*rzE);
+        const ccE=Math.round((W/2)*(1+t1E/tyE));
+        const aimH=capHit?capHit.alt:shipH;               // the beam climbs to its target
+        const rrE=Math.round(HOR+(camH-aimH)*pV/tyE);
+        // fired from the nose/mouth at the front of the craft, not from under
+        // the belly; a small hull buffer keeps the fat beam off the ship
+        const mouthRow=0;
+        const noseR=rowC-CRAFT.length+1+bob;
+        const noseC=colC+Math.round(bankS*(mouthRow-(CRAFT.length>>1))*-1.2);
+        const steps=Math.max(Math.abs(ccE-noseC),Math.abs(rrE-noseR),1);
+        const blockedByHull=(bc,br)=>{
+          for(let dr=-1;dr<=1;dr++)for(let dc=-1;dc<=1;dc++)
+            if(shipMask.has((br+dr)*W+bc+dc))return true;
+          return false;
+        };
+        const beamPut=(bc,br,ch,kd)=>{
+          if(blockedByHull(bc,br))return;
+          put(bc,br,ch,kd,0);GLOWQ.push(bc,br,kd*4);
+        };
+        for(let k3=0;k3<=steps;k3++){
+          const u=k3/steps;
+          const cc=Math.round(noseC+(ccE-noseC)*u), rr=Math.round(noseR+(rrE-noseR)*u);
+          PD=1/((1-u)/BOOM+u/tyE);                        // perspective-correct depth
+          const fz3=hash3(k3,(NOW/50)|0,3);
+          beamPut(cc,rr,fz3<0.7?'#':'=',fz3<0.85?36:5);
+          beamPut(cc-1,rr,'=',37);beamPut(cc+1,rr,'=',37);    // fat glowing beam
+        }
+      }
+    }
+  }
+  PB=0;
   for(const b of BRIDGES){                    // suspension bridge: towers, cables, suspenders
     const len=b.e-b.s, steps=Math.max(24,(len*10)|0);
     const susEv=Math.max(3,Math.round(steps/len));
@@ -944,6 +1669,7 @@ function frame(now){
       const t1=invDet*(dirZ*rx-dirX*rz);
       const sxc=Math.round((W/2)*(1+t1/ty));
       if(sxc<-80||sxc>W+80){pc=-9999;continue}
+      PD=ty;
       const fg=fogOf(ty), tw=0.12, top=0.62;
       let cy,ch;
       if(t<tw){cy=0.03+(top-0.03)*(t/tw);ch='/'}          // anchor up to tower
@@ -956,11 +1682,11 @@ function frame(now){
         for(let cc=Math.max(0,d0);cc<=Math.min(W-1,d1);cc++){
           const f2=d1===d0?0:(cc-d0)/(d1-d0);
           const rr=Math.round(sxc>=pc?pr+(rC-pr)*f2:rC+(pr-rC)*f2);
-          if(ty<=GMAX[cc]+2.5)put(cc,Math.max(0,rr),ch,2,fg);
+          put(cc,Math.max(0,rr),ch,2,fg);
         }
-      }else if(sxc>=0&&sxc<W&&ty<=GMAX[sxc]+2.5)put(sxc,Math.max(0,rC),ch,2,fg);
+      }else if(sxc>=0&&sxc<W)put(sxc,Math.max(0,rC),ch,2,fg);
       pc=sxc;pr=rC;
-      if(sxc>=0&&sxc<W-1&&ty<=GMAX[sxc]+2.5){
+      if(sxc>=0&&sxc<W-1){
         if(k%susEv===0&&t>tw&&t<1-tw){         // suspender cables down to the deck
           const rD=Math.min(H-1,Math.round(HOR+(camH-0.03)*pV/ty));
           for(let r=rC+1;r<rD;r++)put(sxc,r,'|',3,fg)}
@@ -982,39 +1708,44 @@ function frame(now){
     for(let k=0;k<b.length;k+=3)ctx.fillRect(b[k]*CW,b[k+1]*LH,CW,(b[k+2]-b[k+1]+1)*LH)}
   ctx.font=FONT;ctx.textBaseline='top';
   for(let r=0;r<H;r++){
-    let run='',rc=-1,rx0=0;const y=r*LH,off=r*W;
+    let run='',rc=-1,rb=0,rx0=0;const y=r*LH,off=r*W;
     for(let x=0;x<W;x++){
       const ch=CH[off+x];
       if(ch===' '){if(run)run+=' ';continue}
-      const co=CO[off+x];
-      if(co!==rc||!run){
-        if(run){ctx.fillStyle=FPAL[rc>>2][rc&3];ctx.fillText(run,rx0*CW,y)}
-        run=ch;rc=co;rx0=x}
+      const co=CO[off+x],bt=BRT[off+x];
+      if(co!==rc||bt!==rb||!run){
+        if(run&&(rb||(rc&3)<3)){ctx.fillStyle=(rb?FPAL:FPALD)[rc>>2][rc&3];
+          if(!rb){const fr=(0.5-r/H)/0.5;                 // the upper half of the frame
+            if(fr>0)ctx.globalAlpha=Math.max(0.1,1-fr*1.25)}   // falls almost black
+          ctx.fillText(run,rx0*CW,y);ctx.globalAlpha=1}
+        run=ch;rc=co;rb=bt;rx0=x}
       else run+=ch;
     }
-    if(run){ctx.fillStyle=FPAL[rc>>2][rc&3];ctx.fillText(run,rx0*CW,y)}
+    if(run&&(rb||(rc&3)<3)){ctx.fillStyle=(rb?FPAL:FPALD)[rc>>2][rc&3];
+          if(!rb){const fr=(0.5-r/H)/0.5;                 // the upper half of the frame
+            if(fr>0)ctx.globalAlpha=Math.max(0.1,1-fr*1.25)}   // falls almost black
+          ctx.fillText(run,rx0*CW,y);ctx.globalAlpha=1}
+  }
+  if(BLOOM_OK&&GLOWQ.length){                  // flame + laser + blast bloom: quarter-res halo,
+    gctx.clearRect(0,0,gcv.width,gcv.height);  // blurred once on the way back up
+    const qw=CW/4,qh=LH/4;
+    for(let i=0;i<GLOWQ.length;i+=3){
+      const x=GLOWQ[i],r=GLOWQ[i+1],co=GLOWQ[i+2];
+      if(x<0||x>=W||r<0||r>=H)continue;
+      gctx.fillStyle=FPAL[co>>2][co&3];
+      gctx.globalAlpha=0.14;gctx.fillRect((x-2)*qw,(r-1.2)*qh,qw*5,qh*3.4);
+      gctx.globalAlpha=0.45;gctx.fillRect((x-0.7)*qw,(r-0.35)*qh,qw*2.4,qh*1.7);
+    }
+    gctx.globalAlpha=1;
+    ctx.globalCompositeOperation='screen';
+    ctx.filter='blur(6px)';
+    ctx.drawImage(gcv,0,0,cv.width,cv.height);
+    ctx.filter='none';ctx.globalCompositeOperation='source-over';
   }
   ctx.globalCompositeOperation='screen';                 // sky glow blended over the scene
-  ctx.globalAlpha=0.09;
+  ctx.globalAlpha=0.065;
   ctx.fillStyle=skyGrad;ctx.fillRect(0,0,cv.width,cv.height);
   ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
-  ctx.fillStyle='rgba(210,255,230,0.45)';                // crosshair
-  ctx.fillRect(cv.width/2-5,cv.height/2,11,1);
-  ctx.fillRect(cv.width/2,cv.height/2-5,1,11);
-  if(web){                                               // the web line
-    let rx=web.x-px,rz=web.z-pz;
-    rx-=G*Math.round(rx/G);rz-=G*Math.round(rz/G);
-    const t1=invDet*(dirZ*rx-dirX*rz), ty=invDet*(-plZ*rx+plX*rz);
-    if(ty>0.15){
-      const axp=(W/2)*(1+t1/ty)*CW, ayp=(HOR+(camH-web.y)*pV/ty)*LH;
-      const hx2=cv.width/2+cv.width*0.05, hy2=cv.height*0.72;
-      ctx.strokeStyle='rgba(235,250,240,0.85)';
-      ctx.lineWidth=Math.min(4,1+6/ty);
-      ctx.beginPath();ctx.moveTo(hx2,hy2);
-      ctx.quadraticCurveTo((hx2+axp)/2,(hy2+ayp)/2+Math.min(60,cv.height*0.04),axp,ayp);
-      ctx.stroke();
-    }
-  }
   if(showMap){                                  // circular radar, heading-up, always on
     const mR=Math.min(96,cv.width*0.085), mcx=cv.width-mR-18, mcy=mR+52;
     ctx.save();
@@ -1045,10 +1776,10 @@ function frame(now){
     ctx.restore();
     ctx.strokeStyle='rgba(140,230,180,0.5)';ctx.lineWidth=1.5;
     ctx.beginPath();ctx.arc(mcx,mcy,mR,0,7);ctx.stroke()}
-  requestAnimationFrame(frame);
+  px=shipX;pz=shipZ;camH=shipH;                           // hand physics its coords back
+  rafId=requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
-setTimeout(()=>document.getElementById('hint').style.opacity=0.25,9000);
+rafId=requestAnimationFrame(frame);
 </script>
 </body>
 </html>
