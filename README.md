@@ -1,4 +1,4 @@
-# NEON-ZAKA
+# A playable ASCII city
 
 A living ASCII metropolis in a single HTML file. No libraries, no assets — just
 JavaScript, Canvas, and characters.
